@@ -4,7 +4,7 @@ import type {
   ProjectWorkspaceStage,
 } from "@scratch-pad/shared";
 import { listScratchNotesByProjectId } from "./notes.js";
-import { getLatestPlanVersionByProjectId } from "./plans.js";
+import { getProjectProductState } from "./product-context-service.js";
 import { getProjectById } from "./projects.js";
 import { listRunsByProjectId } from "./runs.js";
 import { listTasksByProjectId } from "./tasks.js";
@@ -20,7 +20,10 @@ export function getProjectWorkspace(
   }
 
   const notes = listScratchNotesByProjectId(database, projectId);
-  const plan = getLatestPlanVersionByProjectId(database, projectId);
+  const { productContext, plan, approvedPlan } = getProjectProductState(
+    database,
+    project,
+  );
   const tasks = listTasksByProjectId(database, projectId);
   const runs = listRunsByProjectId(database, projectId);
 
@@ -34,10 +37,15 @@ export function getProjectWorkspace(
       planApproved: plan?.approved ?? false,
       hasTasks: tasks.length > 0,
       hasRuns: runs.length > 0,
-      hasReview: tasks.some((task) => task.status === "review"),
+      hasReview: tasks.some(
+        (task) =>
+          task.status === "review" || task.status === "review_blocked",
+      ),
     }),
     notes,
+    productContext,
     plan,
+    approvedPlan,
     tasks,
     runs,
   };

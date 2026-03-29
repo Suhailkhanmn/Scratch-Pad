@@ -4,6 +4,7 @@ import type {
   AdapterId,
   Run,
   RunDiffStats,
+  ReviewHandoffStatus,
   RunStatus,
 } from "@scratch-pad/shared";
 
@@ -17,6 +18,8 @@ type RunRow = {
   output_log_path: string;
   git_base_branch: string | null;
   git_base_commit: string | null;
+  review_status: ReviewHandoffStatus;
+  review_failure_reason: string | null;
   review_branch_name: string | null;
   review_changed_files_json: string | null;
   review_diff_stats_json: string | null;
@@ -48,6 +51,8 @@ export function createRun(
     outputLogPath: input.outputLogPath,
     gitBaseBranch: input.gitBaseBranch,
     gitBaseCommit: input.gitBaseCommit,
+    reviewStatus: "not_started",
+    reviewFailureReason: null,
     reviewBranchName: null,
     reviewChangedFiles: null,
     reviewDiffStats: null,
@@ -70,6 +75,8 @@ export function createRun(
           output_log_path,
           git_base_branch,
           git_base_commit,
+          review_status,
+          review_failure_reason,
           review_branch_name,
           review_changed_files_json,
           review_diff_stats_json,
@@ -78,7 +85,7 @@ export function createRun(
           started_at,
           finished_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
     )
     .run(
@@ -91,6 +98,8 @@ export function createRun(
       run.outputLogPath,
       run.gitBaseBranch,
       run.gitBaseCommit,
+      run.reviewStatus,
+      run.reviewFailureReason,
       run.reviewBranchName,
       stringifyJson(run.reviewChangedFiles),
       stringifyJson(run.reviewDiffStats),
@@ -117,6 +126,8 @@ export function getRunById(database: DatabaseSync, id: string): Run | null {
           output_log_path,
           git_base_branch,
           git_base_commit,
+          review_status,
+          review_failure_reason,
           review_branch_name,
           review_changed_files_json,
           review_diff_stats_json,
@@ -150,6 +161,8 @@ export function listRunsByProjectId(
           output_log_path,
           git_base_branch,
           git_base_commit,
+          review_status,
+          review_failure_reason,
           review_branch_name,
           review_changed_files_json,
           review_diff_stats_json,
@@ -184,6 +197,8 @@ export function getLatestRunByTaskId(
           output_log_path,
           git_base_branch,
           git_base_commit,
+          review_status,
+          review_failure_reason,
           review_branch_name,
           review_changed_files_json,
           review_diff_stats_json,
@@ -216,6 +231,8 @@ export function getActiveRun(database: DatabaseSync): Run | null {
           output_log_path,
           git_base_branch,
           git_base_commit,
+          review_status,
+          review_failure_reason,
           review_branch_name,
           review_changed_files_json,
           review_diff_stats_json,
@@ -292,6 +309,8 @@ export function updateRunReviewArtifact(
       `
         UPDATE runs
         SET
+          review_status = 'prepared',
+          review_failure_reason = NULL,
           review_branch_name = ?,
           review_changed_files_json = ?,
           review_diff_stats_json = ?,
@@ -306,6 +325,46 @@ export function updateRunReviewArtifact(
       stringifyJson(input.reviewDiffStats),
       input.reviewSummary,
       reviewPreparedAt,
+      input.id,
+    );
+
+  return getRunById(database, input.id);
+}
+
+export function updateRunReviewStatus(
+  database: DatabaseSync,
+  input: {
+    id: string;
+    reviewStatus: ReviewHandoffStatus;
+    reviewFailureReason?: string | null;
+  },
+): Run | null {
+  const existingRun = getRunById(database, input.id);
+
+  if (!existingRun) {
+    return null;
+  }
+
+  const nextReviewPreparedAt =
+    input.reviewStatus === "prepared"
+      ? existingRun.reviewPreparedAt ?? new Date().toISOString()
+      : null;
+
+  database
+    .prepare(
+      `
+        UPDATE runs
+        SET
+          review_status = ?,
+          review_failure_reason = ?,
+          review_prepared_at = ?
+        WHERE id = ?
+      `,
+    )
+    .run(
+      input.reviewStatus,
+      input.reviewFailureReason ?? null,
+      nextReviewPreparedAt,
       input.id,
     );
 
@@ -353,6 +412,8 @@ function mapRunRow(row: RunRow): Run {
     outputLogPath: row.output_log_path,
     gitBaseBranch: row.git_base_branch,
     gitBaseCommit: row.git_base_commit,
+    reviewStatus: row.review_status,
+    reviewFailureReason: row.review_failure_reason,
     reviewBranchName: row.review_branch_name,
     reviewChangedFiles: parseJson<string[]>(row.review_changed_files_json),
     reviewDiffStats: parseJson<RunDiffStats>(row.review_diff_stats_json),

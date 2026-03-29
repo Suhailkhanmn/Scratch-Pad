@@ -160,15 +160,49 @@ export const ScratchNoteParamsSchema = z.object({
 
 export const PlanVersionIdSchema = z.string().uuid();
 
+const ProductMarkdownSchema = z.string().max(50_000);
+
+export const ProductDocumentSchema = z.object({
+  path: z.string().min(1),
+  content: ProductMarkdownSchema,
+});
+
+export type ProductDocument = z.infer<typeof ProductDocumentSchema>;
+
+export const ProductContextSchema = z.object({
+  rootPath: z.string().min(1),
+  prd: ProductDocumentSchema,
+  features: ProductDocumentSchema,
+  decisions: ProductDocumentSchema,
+  openQuestions: ProductDocumentSchema,
+});
+
+export type ProductContext = z.infer<typeof ProductContextSchema>;
+
+export const ProductContextUpdateInputSchema = z.object({
+  prd: ProductMarkdownSchema.optional(),
+  features: ProductMarkdownSchema.optional(),
+  decisions: ProductMarkdownSchema.optional(),
+  openQuestions: ProductMarkdownSchema.optional(),
+});
+
+export type ProductContextUpdateInput = z.infer<
+  typeof ProductContextUpdateInputSchema
+>;
+
 export const PlanItemListSchema = z.array(z.string().trim().min(1)).min(1);
 
 export const PlanVersionSchema = z.object({
   id: PlanVersionIdSchema,
   projectId: ProjectIdSchema,
+  versionNumber: z.number().int().positive(),
   summary: z.string().min(1),
   scope: PlanItemListSchema,
   acceptance: PlanItemListSchema,
   nonGoals: PlanItemListSchema,
+  sourcePath: z.string().min(1),
+  bodyMarkdown: ProductMarkdownSchema,
+  contentHash: z.string().min(1),
   approved: z.boolean(),
   createdAt: IsoTimestampSchema,
 });
@@ -177,7 +211,11 @@ export type PlanVersion = z.infer<typeof PlanVersionSchema>;
 
 export const ProjectPlanSchema = PlanVersionSchema.nullable();
 
-export const RevisePrdInputSchema = z.object({
+export const DraftPrdInputSchema = ProductContextUpdateInputSchema;
+
+export type DraftPrdInput = z.infer<typeof DraftPrdInputSchema>;
+
+export const RevisePrdInputSchema = ProductContextUpdateInputSchema.extend({
   instruction: z.string().trim().min(1).max(4000),
 });
 
@@ -196,11 +234,34 @@ export const PlanMutationResultSchema = z.object({
 
 export type PlanMutationResult = z.infer<typeof PlanMutationResultSchema>;
 
+export const ProductContextMutationResultSchema = z.object({
+  productContext: ProductContextSchema,
+  message: z.string().min(1),
+});
+
+export type ProductContextMutationResult = z.infer<
+  typeof ProductContextMutationResultSchema
+>;
+
 export const TaskIdSchema = z.string().uuid();
 
-export const TaskStatusSchema = z.enum(["queued", "blocked", "review"]);
+export const TaskStatusSchema = z.enum([
+  "queued",
+  "blocked",
+  "review",
+  "review_blocked",
+]);
 
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;
+
+export const TaskDriftStatusSchema = z.enum([
+  "aligned",
+  "maybe_stale",
+  "stale",
+  "superseded",
+]);
+
+export type TaskDriftStatus = z.infer<typeof TaskDriftStatusSchema>;
 
 export const TaskRiskLevelSchema = z.enum(["low", "medium", "high"]);
 
@@ -213,6 +274,7 @@ export const TaskSchema = z.object({
   title: z.string().min(1).max(160),
   description: z.string().min(1).max(1000),
   status: TaskStatusSchema,
+  driftStatus: TaskDriftStatusSchema,
   orderIndex: z.number().int().nonnegative(),
   riskLevel: TaskRiskLevelSchema,
   adapterHint: PreferredAdapterSchema,
@@ -250,6 +312,15 @@ export const RunDiffStatsSchema = z.object({
 
 export type RunDiffStats = z.infer<typeof RunDiffStatsSchema>;
 
+export const ReviewHandoffStatusSchema = z.enum([
+  "not_started",
+  "prepared",
+  "blocked",
+  "failed",
+]);
+
+export type ReviewHandoffStatus = z.infer<typeof ReviewHandoffStatusSchema>;
+
 export const RunSchema = z.object({
   id: RunIdSchema,
   projectId: ProjectIdSchema,
@@ -260,6 +331,8 @@ export const RunSchema = z.object({
   outputLogPath: z.string().min(1),
   gitBaseBranch: z.string().min(1).nullable(),
   gitBaseCommit: z.string().min(1).nullable(),
+  reviewStatus: ReviewHandoffStatusSchema,
+  reviewFailureReason: z.string().min(1).nullable(),
   reviewBranchName: z.string().min(1).nullable(),
   reviewChangedFiles: z.array(z.string().min(1)).nullable(),
   reviewDiffStats: RunDiffStatsSchema.nullable(),
@@ -290,7 +363,9 @@ export const ProjectWorkspaceSchema = z.object({
   project: ProjectSchema,
   currentStage: ProjectWorkspaceStageSchema,
   notes: ScratchNoteListSchema,
+  productContext: ProductContextSchema.nullable(),
   plan: ProjectPlanSchema,
+  approvedPlan: ProjectPlanSchema,
   tasks: TaskListSchema,
   runs: RunListSchema,
 });
@@ -299,6 +374,10 @@ export type ProjectWorkspace = z.infer<typeof ProjectWorkspaceSchema>;
 
 export const RunParamsSchema = z.object({
   id: RunIdSchema,
+});
+
+export const TaskParamsSchema = z.object({
+  id: TaskIdSchema,
 });
 
 export const OpenCodexAppResultSchema = z.object({

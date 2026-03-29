@@ -83,10 +83,11 @@ function resolveScopeItem(scopeItem: string, project: Project): TaskResolution {
       key: "notifications",
       scopeItem: normalizedScope,
       project,
-      task: {
-        title: "Show desktop notification on rule match",
-        description:
-          "Add the desktop notification trigger when a saved rule matches.",
+    task: {
+      taskKey: "notifications",
+      title: "Show desktop notification on rule match",
+      description:
+        "Add the desktop notification trigger when a saved rule matches.",
         status: "queued",
         riskLevel: "medium",
         adapterHint: project.preferredAdapter,
@@ -99,8 +100,9 @@ function resolveScopeItem(scopeItem: string, project: Project): TaskResolution {
       key: "rules",
       scopeItem: normalizedScope,
       project,
-      task: {
-        title: "Add rule configuration form",
+    task: {
+      taskKey: "rules",
+      title: "Add rule configuration form",
         description:
           "Add the form and save path for creating and editing rules or thresholds.",
         status: "queued",
@@ -117,8 +119,9 @@ function resolveScopeItem(scopeItem: string, project: Project): TaskResolution {
       key: "local-settings",
       scopeItem: normalizedScope,
       project,
-      task: {
-        title: "Persist local settings",
+    task: {
+      taskKey: "local-settings",
+      title: "Persist local settings",
         description:
           "Save the local settings and restore them on reload.",
         status: "queued",
@@ -137,8 +140,9 @@ function resolveScopeItem(scopeItem: string, project: Project): TaskResolution {
       key: "local-state",
       scopeItem: normalizedScope,
       project,
-      task: {
-        title: "Persist local data",
+    task: {
+      taskKey: "local-state",
+      title: "Persist local data",
         description:
           "Save the approved local data and restore it on reload.",
         status: "queued",
@@ -153,8 +157,9 @@ function resolveScopeItem(scopeItem: string, project: Project): TaskResolution {
       key: "tracking",
       scopeItem: normalizedScope,
       project,
-      task: {
-        title: "Track the primary item",
+    task: {
+      taskKey: "tracking",
+      title: "Track the primary item",
         description:
           "Add the code path that fetches or updates the primary item this product tracks.",
         status: "queued",
@@ -173,8 +178,9 @@ function resolveScopeItem(scopeItem: string, project: Project): TaskResolution {
       key: "review-handoff",
       scopeItem: normalizedScope,
       project,
-      task: {
-        title: "Capture changed files for review handoff",
+    task: {
+      taskKey: "review-handoff",
+      title: "Capture changed files for review handoff",
         description:
           "Store the changed-file list and diff summary needed for review handoff.",
         status: "queued",
@@ -189,8 +195,9 @@ function resolveScopeItem(scopeItem: string, project: Project): TaskResolution {
       key: "ui-surface",
       scopeItem: normalizedScope,
       project,
-      task: {
-        title: "Show primary status on the main screen",
+    task: {
+      taskKey: "ui-surface",
+      title: "Show primary status on the main screen",
         description:
           "Render the main status or result for the approved flow.",
         status: "queued",
@@ -205,8 +212,9 @@ function resolveScopeItem(scopeItem: string, project: Project): TaskResolution {
       key: "main-input",
       scopeItem: normalizedScope,
       project,
-      task: {
-        title: "Add main input form",
+    task: {
+      taskKey: "main-input",
+      title: "Add main input form",
         description:
           "Capture the main input needed to start the approved flow.",
         status: "queued",
@@ -258,6 +266,7 @@ function buildGenericActionTask(
     scopeItem,
     project,
     task: {
+      taskKey: `generic:${taskTitle.toLowerCase()}`,
       title: taskTitle,
       description: taskDescription,
       status: "queued",
@@ -287,7 +296,10 @@ function buildQueuedResolution(input: {
   return {
     kind: "task",
     key: input.key,
-    task: input.task,
+    task: {
+      ...input.task,
+      taskKey: input.key,
+    },
   };
 }
 
@@ -300,6 +312,7 @@ function buildBlockedResolution(
   return {
     kind: "blocked",
     task: {
+      taskKey: `blocked:${toTaskKey(title)}`,
       title,
       description: `${explanation} Approved scope: "${scopeItem}".`,
       status: "blocked",
@@ -484,6 +497,7 @@ function buildDocumentationTask(
       scopeItem,
       project,
       task: {
+        taskKey: "docs-prerequisites",
         title: "Document local runtime prerequisites",
         description:
           "Add the required local setup steps and prerequisites to the README.",
@@ -500,6 +514,7 @@ function buildDocumentationTask(
       scopeItem,
       project,
       task: {
+        taskKey: "docs-limitations",
         title: "Document current product limitations",
         description:
           "Add the approved limitation list to the README.",
@@ -623,7 +638,7 @@ function dedupeTasks(tasks: TaskDraft[]) {
   const results: TaskDraft[] = [];
 
   for (const task of tasks) {
-    const key = `${task.status}:${task.title.trim().toLowerCase()}`;
+    const key = `${task.status}:${task.taskKey}`;
 
     if (seen.has(key)) {
       continue;
@@ -634,6 +649,14 @@ function dedupeTasks(tasks: TaskDraft[]) {
   }
 
   return results;
+}
+
+function toTaskKey(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 function lowerFirst(value: string) {

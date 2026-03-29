@@ -5,7 +5,10 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import type { PreferredAdapter } from "@scratch-pad/shared";
+import type {
+  PreferredAdapter,
+  ReviewHandoffStatus,
+} from "@scratch-pad/shared";
 import {
   ApiError,
   approvePrd,
@@ -19,9 +22,12 @@ import {
   generateTasks,
   openCodexApp,
   prepareReview,
+  saveProductContext,
   revisePrd,
+  rerunTask,
   runNextTask,
   saveProjectSetup,
+  shapeProduct,
   updateScratchNote,
   type AdapterStatus,
   type ProjectWorkspace,
@@ -45,18 +51,11 @@ type AdapterStatusState =
   | { status: "error"; message: string };
 
 type Screen = "welcome" | "projects" | "command";
+type CommandMode = "product" | "code";
 
 const CURRENT_PROJECT_STORAGE_KEY = "scratch-pad/current-project-id";
 const FALLBACK_PROJECT_SUMMARY =
   "a local-first open-source layer that sits on top of Claude Code and Codex and turns messy builder intent into a controlled execution loop. The core idea is simple: instead of bouncing between notes, prompts, terminal commands, and half-structured plans, you dump rough thoughts into the app";
-const STAGE_ORDER: Array<ProjectWorkspace["currentStage"]> = [
-  "project",
-  "scratch",
-  "plan",
-  "queue",
-  "run",
-  "review",
-];
 const FIELD_CLASS =
   "w-full rounded-[18px] border border-white/10 bg-white/[0.08] px-4 py-3 font-body text-sm text-white placeholder:text-white/35 outline-none transition focus:border-white/30 focus:bg-white/[0.12]";
 const PANEL_CLASS =
@@ -80,6 +79,7 @@ export default function App() {
   });
   const [workspace, setWorkspace] = useState<ProjectWorkspace | null>(null);
   const [screen, setScreen] = useState<Screen>("welcome");
+  const [commandMode, setCommandMode] = useState<CommandMode>("product");
   const [projectName, setProjectName] = useState("");
   const [projectAdapter, setProjectAdapter] = useState<
     "" | Exclude<PreferredAdapter, null>
@@ -91,6 +91,10 @@ export default function App() {
   const [newNoteContent, setNewNoteContent] = useState("");
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
+  const [prdDraft, setPrdDraft] = useState("");
+  const [featuresDraft, setFeaturesDraft] = useState("");
+  const [decisionsDraft, setDecisionsDraft] = useState("");
+  const [openQuestionsDraft, setOpenQuestionsDraft] = useState("");
   const [revisionInstruction, setRevisionInstruction] = useState("");
   const [projectMessage, setProjectMessage] = useState<ActionMessage | null>(null);
   const [notesMessage, setNotesMessage] = useState<ActionMessage | null>(null);
@@ -102,7 +106,9 @@ export default function App() {
 
   const project = workspace?.project ?? null;
   const notes = workspace?.notes ?? [];
+  const productContext = workspace?.productContext ?? null;
   const plan = workspace?.plan ?? null;
+  const approvedPlan = workspace?.approvedPlan ?? null;
   const tasks = workspace?.tasks ?? [];
   const runs = workspace?.runs ?? [];
   const codexAdapterStatus =
@@ -155,6 +161,7 @@ export default function App() {
     options?: { syncProjectSetupFields?: boolean },
   ) {
     setWorkspace(nextWorkspace);
+    syncProductDraftFields(nextWorkspace.productContext);
 
     if (options?.syncProjectSetupFields ?? false) {
       setRepoPath(nextWorkspace.project.repoPath ?? "");
@@ -190,6 +197,15 @@ export default function App() {
     return loadedWorkspace;
   }
 
+  function syncProductDraftFields(
+    nextProductContext: ProjectWorkspace["productContext"],
+  ) {
+    setPrdDraft(nextProductContext?.prd.content ?? "");
+    setFeaturesDraft(nextProductContext?.features.content ?? "");
+    setDecisionsDraft(nextProductContext?.decisions.content ?? "");
+    setOpenQuestionsDraft(nextProductContext?.openQuestions.content ?? "");
+  }
+
   async function syncProjectWorkspace(projectId: string) {
     await loadProjectWorkspace(projectId, {
       resetMessages: false,
@@ -220,10 +236,15 @@ export default function App() {
 
   function clearCurrentProject() {
     setWorkspace(null);
+    setCommandMode("product");
     setRepoPath("");
     setSetupAdapter("");
     setEditingNoteId(null);
     setEditingContent("");
+    setPrdDraft("");
+    setFeaturesDraft("");
+    setDecisionsDraft("");
+    setOpenQuestionsDraft("");
     setRevisionInstruction("");
     setScreen("welcome");
     clearActionMessages();
@@ -240,14 +261,26 @@ export default function App() {
         name: projectName,
         preferredAdapter: projectAdapter || null,
       });
+      const optimisticWorkspace = buildOptimisticWorkspace(createdProject);
 
       setProjectName("");
       setProjectAdapter("");
-      await loadProjectWorkspace(createdProject.id, {
+      setNewNoteContent("");
+      setEditingNoteId(null);
+      setEditingContent("");
+      setRevisionInstruction("");
+      applyProjectWorkspace(optimisticWorkspace, {
         syncProjectSetupFields: true,
       });
-      setScreen("projects");
-      setProjectMessage(successMessage("Project created locally."));
+      setScreen(inferScreenFromWorkspace(optimisticWorkspace));
+      setProjectMessage(successMessage("Project created. Finish setup to continue."));
+
+      void loadProjectWorkspace(createdProject.id, {
+        resetMessages: false,
+        syncProjectSetupFields: true,
+      }).catch((error) => {
+        setProjectMessage(errorMessage(error));
+      });
     } catch (error) {
       setProjectMessage(errorMessage(error));
     } finally {
@@ -382,7 +415,12 @@ export default function App() {
     setBusyAction("generate-prd");
 
     try {
-      const result = await generatePrd(project.id);
+      const result = await generatePrd(project.id, {
+        prd: prdDraft,
+        features: featuresDraft,
+        decisions: decisionsDraft,
+        openQuestions: openQuestionsDraft,
+      });
       await syncProjectWorkspace(project.id);
       setPlanMessage(successMessage(result.message));
       setRevisionInstruction("");
@@ -396,7 +434,7 @@ export default function App() {
   async function handleRevisePrd(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (!project || !plan) {
+    if (!project) {
       return;
     }
 
@@ -406,6 +444,10 @@ export default function App() {
     try {
       const result = await revisePrd(project.id, {
         instruction: revisionInstruction,
+        prd: prdDraft,
+        features: featuresDraft,
+        decisions: decisionsDraft,
+        openQuestions: openQuestionsDraft,
       });
       await syncProjectWorkspace(project.id);
       setPlanMessage(successMessage(result.message));
@@ -418,7 +460,7 @@ export default function App() {
   }
 
   async function handleApprovePrd() {
-    if (!project || !plan) {
+    if (!project) {
       return;
     }
 
@@ -426,8 +468,71 @@ export default function App() {
     setBusyAction("approve-prd");
 
     try {
+      await saveProductContext(project.id, {
+        prd: prdDraft,
+        features: featuresDraft,
+        decisions: decisionsDraft,
+        openQuestions: openQuestionsDraft,
+      });
+      const refreshedWorkspace = await loadProjectWorkspace(project.id, {
+        resetMessages: false,
+      });
+      const latestPlan = refreshedWorkspace.plan ?? refreshedWorkspace.approvedPlan;
+
+      if (!latestPlan) {
+        throw new Error("Draft the PRD before approving it for code work.");
+      }
+
       const result = await approvePrd(project.id, {
-        planVersionId: plan.id,
+        planVersionId: latestPlan.id,
+      });
+      await syncProjectWorkspace(project.id);
+      setPlanMessage(successMessage(result.message));
+    } catch (error) {
+      setPlanMessage(errorMessage(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleSaveProductFiles() {
+    if (!project) {
+      return;
+    }
+
+    setPlanMessage(null);
+    setBusyAction("save-product-context");
+
+    try {
+      const result = await saveProductContext(project.id, {
+        prd: prdDraft,
+        features: featuresDraft,
+        decisions: decisionsDraft,
+        openQuestions: openQuestionsDraft,
+      });
+      await syncProjectWorkspace(project.id);
+      setPlanMessage(successMessage(result.message));
+    } catch (error) {
+      setPlanMessage(errorMessage(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleShapeProduct() {
+    if (!project) {
+      return;
+    }
+
+    setPlanMessage(null);
+    setBusyAction("shape-product");
+
+    try {
+      const result = await shapeProduct(project.id, {
+        prd: prdDraft,
+        features: featuresDraft,
+        decisions: decisionsDraft,
+        openQuestions: openQuestionsDraft,
       });
       await syncProjectWorkspace(project.id);
       setPlanMessage(successMessage(result.message));
@@ -489,9 +594,42 @@ export default function App() {
       await syncProjectWorkspace(project.id);
       setRunMessage(successMessage(result.message));
     } catch (error) {
+      await syncProjectWorkspace(project.id).catch(() => undefined);
       setRunMessage(errorMessage(error));
     } finally {
       setBusyAction(null);
+    }
+  }
+
+  async function handleRerunTask(taskId: string) {
+    if (!project) {
+      return;
+    }
+
+    setRunMessage(null);
+    setBusyAction(`rerun-task-${taskId}`);
+
+    try {
+      const result = await rerunTask(taskId);
+      await syncProjectWorkspace(project.id);
+      setRunMessage(successMessage(result.message));
+    } catch (error) {
+      setRunMessage(errorMessage(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleCopyToClipboard(value: string, label: string) {
+    try {
+      if (!window.navigator.clipboard) {
+        throw new Error("Clipboard access is not available in this browser.");
+      }
+
+      await window.navigator.clipboard.writeText(value);
+      setRunMessage(successMessage(`${label} copied to the clipboard.`));
+    } catch (error) {
+      setRunMessage(errorMessage(error));
     }
   }
 
@@ -533,13 +671,28 @@ export default function App() {
       latestRunByTaskId.get(task.id)?.status !== "completed",
   );
   const blockedTasks = tasks.filter((task) => task.status === "blocked");
+  const alignedQueuedTasks = queuedTasks.filter(
+    (task) => task.driftStatus === "aligned",
+  );
+  const staleOpenTasks = tasks.filter(
+    (task) =>
+      (task.status === "queued" || task.status === "blocked") &&
+      task.driftStatus !== "aligned",
+  );
   const reviewTasks = tasks.filter((task) => task.status === "review");
-  const highRiskQueuedTasks = queuedTasks.filter(
+  const reviewBlockedTasks = tasks.filter(
+    (task) => task.status === "review_blocked",
+  );
+  const reviewBlockedTaskRuns = reviewBlockedTasks.map((task) => ({
+    task,
+    run: latestRunByTaskId.get(task.id) ?? null,
+  }));
+  const highRiskQueuedTasks = alignedQueuedTasks.filter(
     (task) => task.riskLevel === "high",
   );
   const nextRunnableTask = activeRun
     ? null
-    : queuedTasks.find((task) => task.riskLevel !== "high") ?? null;
+    : alignedQueuedTasks.find((task) => task.riskLevel !== "high") ?? null;
   const latestRun = runs[0] ?? null;
   const featuredRun = activeRun ?? latestRun;
   const recentRuns = runs.slice(0, 4);
@@ -550,7 +703,7 @@ export default function App() {
     featuredRun &&
       !activeRun &&
       featuredRun.status === "completed" &&
-      !featuredRun.reviewPreparedAt,
+      featuredRun.reviewStatus !== "prepared",
   );
   const canOpenCodexDesktop = Boolean(
     project?.repoPath && codexAdapterStatus?.appLaunchSupported,
@@ -559,7 +712,12 @@ export default function App() {
     adapterStatuses.status === "ready"
       ? adapterStatuses.data.filter((status) => status.ready).length
       : 0;
-  const projectSynopsis = buildProjectSynopsis(project?.name ?? null, notes, plan);
+  const projectSynopsis = buildProjectSynopsis(
+    project?.name ?? null,
+    notes,
+    plan,
+    productContext,
+  );
   const currentScreen = screen === "command" && !project ? "projects" : screen;
 
   useEffect(() => {
@@ -665,13 +823,18 @@ export default function App() {
 
         {currentScreen === "command" && project ? (
           <CommandCenterScreen
+            mode={commandMode}
             project={project}
             currentStage={workspace?.currentStage ?? "project"}
             notes={notes}
+            productContext={productContext}
             plan={plan}
+            approvedPlan={approvedPlan}
             queuedTasks={queuedTasks}
             blockedTasks={blockedTasks}
+            staleOpenTasks={staleOpenTasks}
             reviewTasks={reviewTasks}
+            reviewBlockedTaskRuns={reviewBlockedTaskRuns}
             highRiskQueuedTasks={highRiskQueuedTasks}
             nextTask={nextRunnableTask}
             featuredRun={featuredRun}
@@ -681,12 +844,17 @@ export default function App() {
             newNoteContent={newNoteContent}
             editingNoteId={editingNoteId}
             editingContent={editingContent}
+            prdDraft={prdDraft}
+            featuresDraft={featuresDraft}
+            decisionsDraft={decisionsDraft}
+            openQuestionsDraft={openQuestionsDraft}
             revisionInstruction={revisionInstruction}
             notesMessage={notesMessage}
             planMessage={planMessage}
             queueMessage={queueMessage}
             runMessage={runMessage}
             onBackToProjects={() => setScreen("projects")}
+            onModeChange={setCommandMode}
             onNewNoteContentChange={setNewNoteContent}
             onCreateNote={handleCreateNote}
             onEditStart={(noteId, value) => {
@@ -698,8 +866,14 @@ export default function App() {
               setEditingContent("");
             }}
             onEditingContentChange={setEditingContent}
+            onPrdDraftChange={setPrdDraft}
+            onFeaturesDraftChange={setFeaturesDraft}
+            onDecisionsDraftChange={setDecisionsDraft}
+            onOpenQuestionsDraftChange={setOpenQuestionsDraft}
             onSaveNote={(noteId) => void handleSaveNote(noteId)}
             onDeleteNote={(noteId) => void handleDeleteNote(noteId)}
+            onSaveProductFiles={() => void handleSaveProductFiles()}
+            onShapeProduct={() => void handleShapeProduct()}
             onGeneratePrd={() => void handleGeneratePrd()}
             onRevisionInstructionChange={setRevisionInstruction}
             onRevisePrd={handleRevisePrd}
@@ -707,6 +881,10 @@ export default function App() {
             onGenerateTasks={() => void handleGenerateTasks()}
             onRunNextTask={() => void handleRunNextTask()}
             onPrepareReview={(runId) => void handlePrepareReview(runId)}
+            onRerunTask={(taskId) => void handleRerunTask(taskId)}
+            onCopyToClipboard={(value, label) =>
+              void handleCopyToClipboard(value, label)
+            }
           />
         ) : null}
       </main>
@@ -1084,13 +1262,18 @@ function ActiveProjectsScreen(props: {
 }
 
 function CommandCenterScreen(props: {
+  mode: CommandMode;
   project: ProjectWorkspace["project"];
   currentStage: ProjectWorkspace["currentStage"];
   notes: ProjectWorkspace["notes"];
+  productContext: ProjectWorkspace["productContext"];
   plan: ProjectWorkspace["plan"];
+  approvedPlan: ProjectWorkspace["approvedPlan"];
   queuedTasks: Task[];
   blockedTasks: Task[];
+  staleOpenTasks: Task[];
   reviewTasks: Task[];
+  reviewBlockedTaskRuns: Array<{ task: Task; run: Run | null }>;
   highRiskQueuedTasks: Task[];
   nextTask: Task | null;
   featuredRun: Run | null;
@@ -1100,19 +1283,30 @@ function CommandCenterScreen(props: {
   newNoteContent: string;
   editingNoteId: string | null;
   editingContent: string;
+  prdDraft: string;
+  featuresDraft: string;
+  decisionsDraft: string;
+  openQuestionsDraft: string;
   revisionInstruction: string;
   notesMessage: ActionMessage | null;
   planMessage: ActionMessage | null;
   queueMessage: ActionMessage | null;
   runMessage: ActionMessage | null;
   onBackToProjects: () => void;
+  onModeChange: (mode: CommandMode) => void;
   onNewNoteContentChange: (value: string) => void;
   onCreateNote: (event: FormEvent<HTMLFormElement>) => void;
   onEditStart: (noteId: string, value: string) => void;
   onEditCancel: () => void;
   onEditingContentChange: (value: string) => void;
+  onPrdDraftChange: (value: string) => void;
+  onFeaturesDraftChange: (value: string) => void;
+  onDecisionsDraftChange: (value: string) => void;
+  onOpenQuestionsDraftChange: (value: string) => void;
   onSaveNote: (noteId: string) => void;
   onDeleteNote: (noteId: string) => void;
+  onSaveProductFiles: () => void;
+  onShapeProduct: () => void;
   onGeneratePrd: () => void;
   onRevisionInstructionChange: (value: string) => void;
   onRevisePrd: (event: FormEvent<HTMLFormElement>) => void;
@@ -1120,6 +1314,8 @@ function CommandCenterScreen(props: {
   onGenerateTasks: () => void;
   onRunNextTask: () => void;
   onPrepareReview: (runId: string) => void;
+  onRerunTask: (taskId: string) => void;
+  onCopyToClipboard: (value: string, label: string) => void;
 }) {
   const featuredRun = props.featuredRun;
   const runButtonDisabled =
@@ -1132,21 +1328,29 @@ function CommandCenterScreen(props: {
         (featuredRun.status === "starting" || featuredRun.status === "running"),
     );
   const taskGenerationDisabled =
-    !props.plan?.approved || props.busyAction === "generate-tasks";
-  const stageProgress =
-    (STAGE_ORDER.indexOf(props.currentStage) + 1) / STAGE_ORDER.length;
+    !props.approvedPlan || props.busyAction === "generate-tasks";
+  const productActionsDisabled = !props.project.repoPath;
   const featuredRunPrepareAction =
     featuredRun && props.canPrepareFeaturedRun
       ? () => props.onPrepareReview(featuredRun.id)
       : null;
+  const draftAheadOfCode = Boolean(
+    props.plan &&
+      props.approvedPlan &&
+      props.plan.id !== props.approvedPlan.id,
+  );
   const primaryStatus = buildPrimaryStatusSummary({
     project: props.project,
     currentStage: props.currentStage,
     notes: props.notes,
+    productContext: props.productContext,
     plan: props.plan,
+    approvedPlan: props.approvedPlan,
     queuedTasks: props.queuedTasks,
     blockedTasks: props.blockedTasks,
+    staleOpenTaskCount: props.staleOpenTasks.length,
     reviewTasks: props.reviewTasks,
+    reviewBlockedCount: props.reviewBlockedTaskRuns.length,
     nextTask: props.nextTask,
     featuredRun,
   });
@@ -1188,468 +1392,919 @@ function CommandCenterScreen(props: {
             </div>
 
             <div className="flex flex-wrap gap-2">
+              <Badge>{props.mode}</Badge>
               <Badge>{formatProjectWorkspaceStage(props.currentStage)}</Badge>
               {featuredRun ? (
                 <Badge>{formatRunDisplayState(featuredRun)}</Badge>
               ) : null}
+              {props.approvedPlan ? (
+                <Badge>approved_prd_v{props.approvedPlan.versionNumber}</Badge>
+              ) : null}
+              {draftAheadOfCode ? <Badge>draft_ahead_of_code</Badge> : null}
               {props.nextTask ? <Badge>next_task_ready</Badge> : null}
               {props.reviewTasks.length > 0 ? (
                 <Badge>{props.reviewTasks.length} review_ready</Badge>
+              ) : null}
+              {props.staleOpenTasks.length > 0 ? (
+                <Badge>{props.staleOpenTasks.length} maybe_stale</Badge>
+              ) : null}
+              {props.reviewBlockedTaskRuns.length > 0 ? (
+                <Badge>
+                  {props.reviewBlockedTaskRuns.length} review_blocked
+                </Badge>
               ) : null}
             </div>
           </div>
         </section>
 
-        <div className="grid flex-1 gap-6 xl:grid-cols-[0.78fr_1.02fr]">
-          <section className={cx(PANEL_CLASS, "relative min-h-[720px] overflow-hidden")}>
-            <header className="flex items-center justify-between border-b border-white/10 px-6 py-5">
-              <div className="font-display text-[20px] lowercase tracking-[0.08em] text-white md:text-[30px]">
-                scratch_pad
-              </div>
-              <div className="font-display text-[18px] lowercase tracking-[0.08em] text-white/55 md:text-[30px]">
-                PRD
-              </div>
-            </header>
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+          <CommandModeSwitch
+            mode={props.mode}
+            onModeChange={props.onModeChange}
+          />
 
-            <div className="absolute bottom-6 left-6 top-[126px] hidden w-[11px] rounded-full bg-white/[0.08] lg:block">
-              <div
-                className="w-full rounded-full bg-white/[0.24] transition-all"
-                style={{ height: `${Math.max(stageProgress * 100, 12)}%` }}
-              />
-            </div>
-
-            <div className="max-h-[calc(100vh-220px)] space-y-6 overflow-y-auto px-5 py-5 lg:pl-10 lg:pr-6">
-              <section className={cx(INNER_CARD_CLASS, "p-5")}>
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <div className="text-xs uppercase tracking-[0.22em] text-white/45">
-                      project_snapshot
-                    </div>
-                    <div className="mt-2 font-display text-lg lowercase tracking-[0.08em] text-white">
-                      {props.project.name}
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    <Badge>{props.project.repoPath ? "repo_linked" : "repo_missing"}</Badge>
-                    <Badge>
-                      {props.project.preferredAdapter
-                        ? formatAdapterLabel(props.project.preferredAdapter)
-                        : "select_adapter"}
-                    </Badge>
-                  </div>
-                </div>
-
-                <p className="mt-4 break-all font-body text-sm leading-7 text-white/65">
-                  {props.project.repoPath ?? "Link a local repository from active_projects before you start a run."}
-                </p>
-              </section>
-
-              <section className={cx(INNER_CARD_CLASS, "p-5")}>
-                <div className="mb-4 flex items-center justify-between gap-3">
-                  <div className="font-display text-lg lowercase tracking-[0.08em] text-white">
-                    scratch_notes
-                  </div>
-                  <Badge>{props.notes.length}</Badge>
-                </div>
-
-                {props.notesMessage ? (
-                  <div className="mb-4">
-                    <InlineMessage tone={props.notesMessage.tone}>
-                      {props.notesMessage.text}
-                    </InlineMessage>
-                  </div>
-                ) : null}
-
-                <form className="space-y-3" onSubmit={props.onCreateNote}>
-                  <textarea
-                    className={FIELD_CLASS}
-                    rows={4}
-                    placeholder="dump the rough idea, constraints, and desired outcome here..."
-                    value={props.newNoteContent}
-                    onChange={(event) =>
-                      props.onNewNoteContentChange(event.target.value)
-                    }
-                  />
-
-                  <ActionButton
-                    type="submit"
-                    disabled={
-                      props.busyAction === "create-note" ||
-                      props.newNoteContent.trim().length === 0
-                    }
-                  >
-                    {props.busyAction === "create-note"
-                      ? "saving_note..."
-                      : "add_note"}
-                  </ActionButton>
-                </form>
-
-                <div className="mt-5 space-y-3">
-                  {props.notes.length === 0 ? (
-                    <EmptyGlassState>
-                      No notes yet. Add the first rough product note to feed the PRD.
-                    </EmptyGlassState>
-                  ) : (
-                    props.notes.map((note) => {
-                      const isEditing = props.editingNoteId === note.id;
-                      const isSaving = props.busyAction === `save-note-${note.id}`;
-                      const isDeleting =
-                        props.busyAction === `delete-note-${note.id}`;
-
-                      return (
-                        <article
-                          key={note.id}
-                          className="rounded-[18px] border border-white/10 bg-white/[0.05] p-4"
-                        >
-                          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                            <div className="text-xs uppercase tracking-[0.2em] text-white/38">
-                              updated / {formatTimestamp(note.updatedAt)}
-                            </div>
-                            <div className="flex flex-wrap gap-2">
-                              {isEditing ? (
-                                <>
-                                  <GhostButton
-                                    onClick={() => props.onSaveNote(note.id)}
-                                    disabled={
-                                      isSaving ||
-                                      props.editingContent.trim().length === 0
-                                    }
-                                  >
-                                    {isSaving ? "saving..." : "save"}
-                                  </GhostButton>
-                                  <GhostButton onClick={props.onEditCancel}>
-                                    cancel
-                                  </GhostButton>
-                                </>
-                              ) : (
-                                <GhostButton
-                                  onClick={() =>
-                                    props.onEditStart(note.id, note.content)
-                                  }
-                                >
-                                  edit
-                                </GhostButton>
-                              )}
-                              <GhostButton
-                                onClick={() => props.onDeleteNote(note.id)}
-                                disabled={isDeleting}
-                              >
-                                {isDeleting ? "deleting..." : "delete"}
-                              </GhostButton>
-                            </div>
-                          </div>
-
-                          {isEditing ? (
-                            <textarea
-                              className={FIELD_CLASS}
-                              rows={4}
-                              value={props.editingContent}
-                              onChange={(event) =>
-                                props.onEditingContentChange(event.target.value)
-                              }
-                            />
-                          ) : (
-                            <p className="whitespace-pre-wrap font-body text-sm leading-7 text-white/72">
-                              {note.content}
-                            </p>
-                          )}
-                        </article>
-                      );
-                    })
-                  )}
-                </div>
-              </section>
-
-              <section className={cx(INNER_CARD_CLASS, "p-5")}>
-                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <div className="text-xs uppercase tracking-[0.22em] text-white/45">
-                      PRD_status
-                    </div>
-                    <div className="mt-2 font-display text-lg lowercase tracking-[0.08em] text-white">
-                      {props.plan ? "working_prd" : "generate_prd"}
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    {props.plan ? (
-                      <Badge>{props.plan.approved ? "approved" : "draft"}</Badge>
-                    ) : null}
-                    <ActionButton
-                      onClick={props.onGeneratePrd}
-                      disabled={
-                        props.notes.length === 0 ||
-                        props.busyAction === "generate-prd"
-                      }
-                    >
-                      {props.busyAction === "generate-prd"
-                        ? "generating..."
-                        : props.plan
-                          ? "regenerate"
-                          : "generate_prd"}
-                    </ActionButton>
-                  </div>
-                </div>
-
-                {props.planMessage ? (
-                  <div className="mb-4">
-                    <InlineMessage tone={props.planMessage.tone}>
-                      {props.planMessage.text}
-                    </InlineMessage>
-                  </div>
-                ) : null}
-
-                {props.notes.length === 0 ? (
-                  <EmptyGlassState>
-                    Add at least one scratch note before generating the first PRD.
-                  </EmptyGlassState>
-                ) : !props.plan ? (
-                  <EmptyGlassState>
-                    The PRD lives here once generated. Keep the notes tight, then generate a compact draft.
-                  </EmptyGlassState>
-                ) : (
-                  <>
-                    <div className="rounded-[20px] border border-white/10 bg-white/[0.04] p-4">
-                      <div className="text-xs uppercase tracking-[0.2em] text-white/38">
-                        summary
-                      </div>
-                      <p className="mt-3 font-body text-sm leading-7 text-white/74">
-                        {props.plan.summary}
-                      </p>
-                    </div>
-
-                    <div className="mt-4 grid gap-4 lg:grid-cols-3">
-                      <PlanCluster title="scope" items={props.plan.scope} />
-                      <PlanCluster title="acceptance" items={props.plan.acceptance} />
-                      <PlanCluster title="non_goals" items={props.plan.nonGoals} />
-                    </div>
-
-                    <form className="mt-5 space-y-3" onSubmit={props.onRevisePrd}>
-                      <textarea
-                        className={FIELD_CLASS}
-                        rows={4}
-                        placeholder="tighten a line, narrow the scope, or clarify acceptance..."
-                        value={props.revisionInstruction}
-                        onChange={(event) =>
-                          props.onRevisionInstructionChange(event.target.value)
-                        }
-                      />
-
-                      <div className="flex flex-wrap gap-3">
-                        <ActionButton
-                          type="submit"
-                          disabled={
-                            props.busyAction === "revise-prd" ||
-                            props.revisionInstruction.trim().length === 0
-                          }
-                        >
-                          {props.busyAction === "revise-prd"
-                            ? "revising..."
-                            : "revise_prd"}
-                        </ActionButton>
-
-                        <GhostButton
-                          onClick={props.onApprovePrd}
-                          disabled={
-                            props.busyAction === "approve-prd" ||
-                            props.plan.approved
-                          }
-                        >
-                          {props.busyAction === "approve-prd"
-                            ? "approving..."
-                            : props.plan.approved
-                              ? "approved"
-                              : "approve_prd"}
-                        </GhostButton>
-                      </div>
-                    </form>
-                  </>
-                )}
-              </section>
-            </div>
-          </section>
-
-          <div className="grid gap-6">
-            <section className={cx(PANEL_CLASS, "overflow-hidden")}>
-              <header className="border-b border-white/10 px-6 py-5">
-                <div className="font-display text-[20px] lowercase tracking-[0.08em] text-white md:text-[30px]">
-                  runs
-                </div>
-              </header>
-
-              <div className="space-y-4 px-5 py-5">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <div className="text-xs uppercase tracking-[0.22em] text-white/42">
-                      run_status
-                    </div>
-                    <div className="mt-2 font-display text-lg lowercase tracking-[0.08em] text-white">
-                      {props.featuredRun
-                        ? formatRunDisplayState(props.featuredRun)
-                        : "idle"}
-                    </div>
-                  </div>
-
-                  <ActionButton
-                    onClick={props.onRunNextTask}
-                    disabled={runButtonDisabled}
-                  >
-                    {props.busyAction === "run-next-task"
-                      ? "starting..."
-                      : "run_next_task"}
-                  </ActionButton>
-                </div>
-
-                {props.runMessage ? (
-                  <InlineMessage tone={props.runMessage.tone}>
-                    {props.runMessage.text}
-                  </InlineMessage>
-                ) : null}
-
-                {featuredRun ? (
-                  <RunFeedCard
-                    run={featuredRun}
-                    isPreparing={
-                      props.busyAction ===
-                      `prepare-review-${featuredRun.id}`
-                    }
-                    {...(featuredRunPrepareAction
-                      ? {
-                          onPrepareReview: featuredRunPrepareAction,
-                        }
-                      : {})}
-                  />
-                ) : (
-                  <EmptyGlassState>
-                    No run has started yet. Generate tasks, then launch the first one from here.
-                  </EmptyGlassState>
-                )}
-
-                <div className="space-y-3">
-                  {props.recentHistoryRuns.length === 0 ? (
-                    <EmptyGlassState>
-                      Older runs will collect here after the first execution.
-                    </EmptyGlassState>
-                  ) : (
-                    props.recentHistoryRuns.map((run) => (
-                      <RunFeedCard
-                        key={run.id}
-                        compact
-                        run={run}
-                        isPreparing={
-                          props.busyAction === `prepare-review-${run.id}`
-                        }
-                        {...(run.status === "completed" && !run.reviewPreparedAt
-                          ? {
-                              onPrepareReview: () =>
-                                props.onPrepareReview(run.id),
-                            }
-                          : {})}
-                      />
-                    ))
-                  )}
-                </div>
-              </div>
-            </section>
-
-            <section className={cx(PANEL_CLASS, "overflow-hidden")}>
-              <header className="border-b border-white/10 px-6 py-5">
-                <div className="font-display text-[20px] lowercase tracking-[0.08em] text-white md:text-[30px]">
-                  next_up
-                </div>
-              </header>
-
-              <div className="space-y-4 px-5 py-5">
-                {props.queueMessage ? (
-                  <InlineMessage tone={props.queueMessage.tone}>
-                    {props.queueMessage.text}
-                  </InlineMessage>
-                ) : null}
-
-                <div className={cx(INNER_CARD_CLASS, "p-5")}>
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <div className="text-xs uppercase tracking-[0.2em] text-white/42">
-                        queue_source
-                      </div>
-                      <div className="mt-2 font-display text-lg lowercase tracking-[0.08em] text-white">
-                        {props.plan?.approved
-                          ? "latest_approved_prd"
-                          : props.plan
-                            ? "draft_prd"
-                            : "waiting_for_prd"}
-                      </div>
-                    </div>
-
-                    <ActionButton
-                      onClick={props.onGenerateTasks}
-                      disabled={taskGenerationDisabled}
-                    >
-                      {props.busyAction === "generate-tasks"
-                        ? "generating..."
-                        : props.queuedTasks.length > 0 ||
-                            props.blockedTasks.length > 0 ||
-                            props.reviewTasks.length > 0
-                          ? "regenerate_tasks"
-                          : "generate_tasks"}
-                    </ActionButton>
-                  </div>
-                </div>
-
-                <div className={cx(INNER_CARD_CLASS, "p-5")}>
-                  <div className="text-xs uppercase tracking-[0.2em] text-white/42">
-                    next_task
-                  </div>
-                  <div className="mt-3 font-display text-lg lowercase tracking-[0.08em] text-white">
-                    {props.nextTask ? props.nextTask.title : "nothing_runnable_right_now"}
-                  </div>
-                  <p className="mt-3 font-body text-sm leading-7 text-white/68">
-                    {props.nextTask
-                      ? props.nextTask.description
-                      : props.highRiskQueuedTasks.length > 0
-                        ? "The remaining queued work is high risk, so it stays visible until you explicitly review it."
-                        : "Generate tasks or unblock existing work to see the next action item here."}
-                  </p>
-                </div>
-
-                <div className={cx(INNER_CARD_CLASS, "p-5")}>
-                  <div className="grid gap-3 sm:grid-cols-3">
-                    <QueueCount label="queued" value={props.queuedTasks.length} />
-                    <QueueCount label="review" value={props.reviewTasks.length} />
-                    <QueueCount label="blocked" value={props.blockedTasks.length} />
-                  </div>
-
-                  <div className="mt-5 space-y-3">
-                    {props.queuedTasks.slice(0, 3).map((task) => (
-                      <TaskPreviewCard key={task.id} task={task} />
-                    ))}
-
-                    {props.queuedTasks.length === 0 &&
-                    props.reviewTasks.length === 0 &&
-                    props.blockedTasks.length === 0 ? (
-                      <EmptyGlassState>
-                        The queue will appear here once tasks are generated from the approved PRD.
-                      </EmptyGlassState>
-                    ) : null}
-
-                    {props.reviewTasks.slice(0, 1).map((task) => (
-                      <TaskPreviewCard key={task.id} task={task} />
-                    ))}
-
-                    {props.blockedTasks.slice(0, 1).map((task) => (
-                      <TaskPreviewCard key={task.id} task={task} />
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </section>
+          <div className="font-body text-sm leading-7 text-white/55">
+            {props.mode === "product"
+              ? "Product mode shapes repo-local meaning: notes, features, PRD, decisions, and open questions."
+              : "Code mode executes only from the approved repo-local PRD and keeps review handoff visible."}
           </div>
         </div>
+
+        {props.mode === "product" ? (
+          <ProductModePanel
+            project={props.project}
+            notes={props.notes}
+            productContext={props.productContext}
+            plan={props.plan}
+            approvedPlan={props.approvedPlan}
+            staleOpenTasks={props.staleOpenTasks}
+            busyAction={props.busyAction}
+            newNoteContent={props.newNoteContent}
+            editingNoteId={props.editingNoteId}
+            editingContent={props.editingContent}
+            prdDraft={props.prdDraft}
+            featuresDraft={props.featuresDraft}
+            decisionsDraft={props.decisionsDraft}
+            openQuestionsDraft={props.openQuestionsDraft}
+            revisionInstruction={props.revisionInstruction}
+            notesMessage={props.notesMessage}
+            planMessage={props.planMessage}
+            productActionsDisabled={productActionsDisabled}
+            onNewNoteContentChange={props.onNewNoteContentChange}
+            onCreateNote={props.onCreateNote}
+            onEditStart={props.onEditStart}
+            onEditCancel={props.onEditCancel}
+            onEditingContentChange={props.onEditingContentChange}
+            onPrdDraftChange={props.onPrdDraftChange}
+            onFeaturesDraftChange={props.onFeaturesDraftChange}
+            onDecisionsDraftChange={props.onDecisionsDraftChange}
+            onOpenQuestionsDraftChange={props.onOpenQuestionsDraftChange}
+            onSaveNote={props.onSaveNote}
+            onDeleteNote={props.onDeleteNote}
+            onSaveProductFiles={props.onSaveProductFiles}
+            onShapeProduct={props.onShapeProduct}
+            onGeneratePrd={props.onGeneratePrd}
+            onRevisionInstructionChange={props.onRevisionInstructionChange}
+            onRevisePrd={props.onRevisePrd}
+            onApprovePrd={props.onApprovePrd}
+          />
+        ) : (
+          <CodeModePanel
+            project={props.project}
+            plan={props.plan}
+            approvedPlan={props.approvedPlan}
+            queuedTasks={props.queuedTasks}
+            blockedTasks={props.blockedTasks}
+            staleOpenTasks={props.staleOpenTasks}
+            reviewTasks={props.reviewTasks}
+            reviewBlockedTaskRuns={props.reviewBlockedTaskRuns}
+            highRiskQueuedTasks={props.highRiskQueuedTasks}
+            nextTask={props.nextTask}
+            featuredRun={featuredRun}
+            recentHistoryRuns={props.recentHistoryRuns}
+            runButtonDisabled={runButtonDisabled}
+            taskGenerationDisabled={taskGenerationDisabled}
+            featuredRunPrepareAction={featuredRunPrepareAction}
+            busyAction={props.busyAction}
+            queueMessage={props.queueMessage}
+            runMessage={props.runMessage}
+            onGenerateTasks={props.onGenerateTasks}
+            onRunNextTask={props.onRunNextTask}
+            onPrepareReview={props.onPrepareReview}
+            onRerunTask={props.onRerunTask}
+            onCopyToClipboard={props.onCopyToClipboard}
+          />
+        )}
 
         <BrandMark className="mt-5 justify-end" />
       </div>
     </FrameSurface>
+  );
+}
+
+function CommandModeSwitch(props: {
+  mode: CommandMode;
+  onModeChange: (mode: CommandMode) => void;
+}) {
+  const modes: CommandMode[] = ["product", "code"];
+
+  return (
+    <div className="inline-flex rounded-full border border-white/10 bg-white/[0.05] p-1">
+      {modes.map((mode) => {
+        const active = props.mode === mode;
+
+        return (
+          <button
+            key={mode}
+            type="button"
+            onClick={() => props.onModeChange(mode)}
+            className={cx(
+              "rounded-full px-4 py-2 font-display text-sm lowercase tracking-[0.08em] transition",
+              active
+                ? "bg-white/[0.14] text-white"
+                : "text-white/58 hover:text-white",
+            )}
+          >
+            {mode}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function ProductModePanel(props: {
+  project: ProjectWorkspace["project"];
+  notes: ProjectWorkspace["notes"];
+  productContext: ProjectWorkspace["productContext"];
+  plan: ProjectWorkspace["plan"];
+  approvedPlan: ProjectWorkspace["approvedPlan"];
+  staleOpenTasks: Task[];
+  busyAction: string | null;
+  newNoteContent: string;
+  editingNoteId: string | null;
+  editingContent: string;
+  prdDraft: string;
+  featuresDraft: string;
+  decisionsDraft: string;
+  openQuestionsDraft: string;
+  revisionInstruction: string;
+  notesMessage: ActionMessage | null;
+  planMessage: ActionMessage | null;
+  productActionsDisabled: boolean;
+  onNewNoteContentChange: (value: string) => void;
+  onCreateNote: (event: FormEvent<HTMLFormElement>) => void;
+  onEditStart: (noteId: string, value: string) => void;
+  onEditCancel: () => void;
+  onEditingContentChange: (value: string) => void;
+  onPrdDraftChange: (value: string) => void;
+  onFeaturesDraftChange: (value: string) => void;
+  onDecisionsDraftChange: (value: string) => void;
+  onOpenQuestionsDraftChange: (value: string) => void;
+  onSaveNote: (noteId: string) => void;
+  onDeleteNote: (noteId: string) => void;
+  onSaveProductFiles: () => void;
+  onShapeProduct: () => void;
+  onGeneratePrd: () => void;
+  onRevisionInstructionChange: (value: string) => void;
+  onRevisePrd: (event: FormEvent<HTMLFormElement>) => void;
+  onApprovePrd: () => void;
+}) {
+  const canDraftPrd =
+    !props.productActionsDisabled &&
+    (props.notes.length > 0 ||
+      props.featuresDraft.trim().length > 0 ||
+      props.decisionsDraft.trim().length > 0 ||
+      props.openQuestionsDraft.trim().length > 0 ||
+      props.prdDraft.trim().length > 0);
+  const approvedVersionLabel = props.approvedPlan
+    ? `approved_v${props.approvedPlan.versionNumber}`
+    : "approval_pending";
+  const latestVersionLabel = props.plan
+    ? `draft_v${props.plan.versionNumber}`
+    : "draft_not_started";
+
+  return (
+    <div className="grid flex-1 gap-6 xl:grid-cols-[0.9fr_1.1fr]">
+      <div className="grid gap-6">
+        <section className={cx(PANEL_CLASS, "overflow-hidden")}>
+          <header className="border-b border-white/10 px-6 py-5">
+            <div className="font-display text-[20px] lowercase tracking-[0.08em] text-white md:text-[30px]">
+              product_context
+            </div>
+          </header>
+
+          <div className="space-y-4 px-5 py-5">
+            <section className={cx(INNER_CARD_CLASS, "p-5")}>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs uppercase tracking-[0.22em] text-white/45">
+                    repo_local_source_of_truth
+                  </div>
+                  <div className="mt-2 font-display text-lg lowercase tracking-[0.08em] text-white">
+                    {props.productContext?.rootPath ?? ".scratchpad/product"}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Badge>
+                    {props.project.repoPath ? "repo_linked" : "repo_missing"}
+                  </Badge>
+                  <Badge>{approvedVersionLabel}</Badge>
+                  <Badge>{latestVersionLabel}</Badge>
+                </div>
+              </div>
+
+              <p className="mt-4 break-all font-body text-sm leading-7 text-white/65">
+                {props.project.repoPath ??
+                  "Link a local repository from active_projects before shaping product context."}
+              </p>
+
+              <div className="mt-4 grid gap-2 md:grid-cols-2">
+                <RepoFileBadge
+                  label="prd"
+                  path={props.productContext?.prd.path ?? ".scratchpad/product/prd.md"}
+                />
+                <RepoFileBadge
+                  label="features"
+                  path={
+                    props.productContext?.features.path ??
+                    ".scratchpad/product/features.md"
+                  }
+                />
+                <RepoFileBadge
+                  label="decisions"
+                  path={
+                    props.productContext?.decisions.path ??
+                    ".scratchpad/product/decisions.md"
+                  }
+                />
+                <RepoFileBadge
+                  label="open_questions"
+                  path={
+                    props.productContext?.openQuestions.path ??
+                    ".scratchpad/product/open-questions.md"
+                  }
+                />
+              </div>
+            </section>
+
+            <section className={cx(INNER_CARD_CLASS, "p-5")}>
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <div className="font-display text-lg lowercase tracking-[0.08em] text-white">
+                  scratch_notes
+                </div>
+                <Badge>{props.notes.length}</Badge>
+              </div>
+
+              {props.notesMessage ? (
+                <div className="mb-4">
+                  <InlineMessage tone={props.notesMessage.tone}>
+                    {props.notesMessage.text}
+                  </InlineMessage>
+                </div>
+              ) : null}
+
+              <form className="space-y-3" onSubmit={props.onCreateNote}>
+                <textarea
+                  className={FIELD_CLASS}
+                  rows={4}
+                  placeholder="capture rough product intent, user pain, and constraints..."
+                  value={props.newNoteContent}
+                  onChange={(event) =>
+                    props.onNewNoteContentChange(event.target.value)
+                  }
+                />
+
+                <ActionButton
+                  type="submit"
+                  disabled={
+                    props.busyAction === "create-note" ||
+                    props.newNoteContent.trim().length === 0
+                  }
+                >
+                  {props.busyAction === "create-note"
+                    ? "saving_note..."
+                    : "add_note"}
+                </ActionButton>
+              </form>
+
+              <div className="mt-5 space-y-3">
+                {props.notes.length === 0 ? (
+                  <EmptyGlassState>
+                    No notes yet. Add raw product context here, then shape the repo-local files from it.
+                  </EmptyGlassState>
+                ) : (
+                  props.notes.map((note) => {
+                    const isEditing = props.editingNoteId === note.id;
+                    const isSaving = props.busyAction === `save-note-${note.id}`;
+                    const isDeleting =
+                      props.busyAction === `delete-note-${note.id}`;
+
+                    return (
+                      <article
+                        key={note.id}
+                        className="rounded-[18px] border border-white/10 bg-white/[0.05] p-4"
+                      >
+                        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-xs uppercase tracking-[0.2em] text-white/38">
+                            updated / {formatTimestamp(note.updatedAt)}
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {isEditing ? (
+                              <>
+                                <GhostButton
+                                  onClick={() => props.onSaveNote(note.id)}
+                                  disabled={
+                                    isSaving ||
+                                    props.editingContent.trim().length === 0
+                                  }
+                                >
+                                  {isSaving ? "saving..." : "save"}
+                                </GhostButton>
+                                <GhostButton onClick={props.onEditCancel}>
+                                  cancel
+                                </GhostButton>
+                              </>
+                            ) : (
+                              <GhostButton
+                                onClick={() =>
+                                  props.onEditStart(note.id, note.content)
+                                }
+                              >
+                                edit
+                              </GhostButton>
+                            )}
+                            <GhostButton
+                              onClick={() => props.onDeleteNote(note.id)}
+                              disabled={isDeleting}
+                            >
+                              {isDeleting ? "deleting..." : "delete"}
+                            </GhostButton>
+                          </div>
+                        </div>
+
+                        {isEditing ? (
+                          <textarea
+                            className={FIELD_CLASS}
+                            rows={4}
+                            value={props.editingContent}
+                            onChange={(event) =>
+                              props.onEditingContentChange(event.target.value)
+                            }
+                          />
+                        ) : (
+                          <p className="whitespace-pre-wrap font-body text-sm leading-7 text-white/72">
+                            {note.content}
+                          </p>
+                        )}
+                      </article>
+                    );
+                  })
+                )}
+              </div>
+            </section>
+
+            <section className={cx(INNER_CARD_CLASS, "p-5")}>
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs uppercase tracking-[0.22em] text-white/45">
+                    product_shaping
+                  </div>
+                  <div className="mt-2 font-display text-lg lowercase tracking-[0.08em] text-white">
+                    notes_features_decisions_questions
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <ActionButton
+                    onClick={props.onSaveProductFiles}
+                    disabled={
+                      props.productActionsDisabled ||
+                      props.busyAction === "save-product-context"
+                    }
+                  >
+                    {props.busyAction === "save-product-context"
+                      ? "saving..."
+                      : "save_product_files"}
+                  </ActionButton>
+
+                  <GhostButton
+                    onClick={props.onShapeProduct}
+                    disabled={
+                      props.productActionsDisabled ||
+                      props.notes.length === 0 ||
+                      props.busyAction === "shape-product"
+                    }
+                  >
+                    {props.busyAction === "shape-product"
+                      ? "shaping..."
+                      : "shape_from_notes"}
+                  </GhostButton>
+                </div>
+              </div>
+
+              {props.planMessage ? (
+                <div className="mb-4">
+                  <InlineMessage tone={props.planMessage.tone}>
+                    {props.planMessage.text}
+                  </InlineMessage>
+                </div>
+              ) : null}
+
+              <div className="space-y-4">
+                <ProductDocumentEditor
+                  title="possible_features"
+                  path={
+                    props.productContext?.features.path ??
+                    ".scratchpad/product/features.md"
+                  }
+                  value={props.featuresDraft}
+                  placeholder={`## Selected\n- ...\n\n## Candidate\n- ...\n\n## Deferred\n- ...`}
+                  rows={10}
+                  onChange={props.onFeaturesDraftChange}
+                />
+
+                <ProductDocumentEditor
+                  title="decisions"
+                  path={
+                    props.productContext?.decisions.path ??
+                    ".scratchpad/product/decisions.md"
+                  }
+                  value={props.decisionsDraft}
+                  placeholder={`## Decisions\n- ...`}
+                  rows={8}
+                  onChange={props.onDecisionsDraftChange}
+                />
+
+                <ProductDocumentEditor
+                  title="open_questions"
+                  path={
+                    props.productContext?.openQuestions.path ??
+                    ".scratchpad/product/open-questions.md"
+                  }
+                  value={props.openQuestionsDraft}
+                  placeholder={`## Open Questions\n- ...`}
+                  rows={8}
+                  onChange={props.onOpenQuestionsDraftChange}
+                />
+              </div>
+            </section>
+          </div>
+        </section>
+      </div>
+
+      <section className={cx(PANEL_CLASS, "overflow-hidden")}>
+        <header className="border-b border-white/10 px-6 py-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="font-display text-[20px] lowercase tracking-[0.08em] text-white md:text-[30px]">
+              evolving_prd
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              {props.plan ? <Badge>draft_v{props.plan.versionNumber}</Badge> : null}
+              {props.approvedPlan ? (
+                <Badge>code_uses_v{props.approvedPlan.versionNumber}</Badge>
+              ) : (
+                <Badge>not_approved</Badge>
+              )}
+              {props.staleOpenTasks.length > 0 ? (
+                <Badge>{props.staleOpenTasks.length} open_tasks_flagged</Badge>
+              ) : null}
+            </div>
+          </div>
+        </header>
+
+        <div className="max-h-[calc(100vh-220px)] space-y-4 overflow-y-auto px-5 py-5">
+          <section className={cx(INNER_CARD_CLASS, "p-5")}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-xs uppercase tracking-[0.22em] text-white/45">
+                  repo_prd_file
+                </div>
+                <div className="mt-2 font-display text-lg lowercase tracking-[0.08em] text-white">
+                  {props.productContext?.prd.path ?? ".scratchpad/product/prd.md"}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <ActionButton
+                  onClick={props.onSaveProductFiles}
+                  disabled={
+                    props.productActionsDisabled ||
+                    props.busyAction === "save-product-context"
+                  }
+                >
+                  {props.busyAction === "save-product-context"
+                    ? "saving..."
+                    : "save_repo_prd"}
+                </ActionButton>
+                <ActionButton
+                  onClick={props.onGeneratePrd}
+                  disabled={
+                    !canDraftPrd || props.busyAction === "generate-prd"
+                  }
+                >
+                  {props.busyAction === "generate-prd"
+                    ? "drafting..."
+                    : props.plan
+                      ? "update_prd"
+                      : "draft_prd"}
+                </ActionButton>
+              </div>
+            </div>
+
+            <p className="mt-4 font-body text-sm leading-7 text-white/65">
+              The repo file is canonical. Notes and product files shape this PRD, then Code mode derives work only from the approved version.
+            </p>
+
+            <textarea
+              className={cx(FIELD_CLASS, "mt-4 min-h-[320px] font-mono text-[13px] leading-7")}
+              value={props.prdDraft}
+              onChange={(event) => props.onPrdDraftChange(event.target.value)}
+              placeholder={`# Product Requirements Document\n\n## Summary\n...\n\n## Scope\n- ...\n\n## Acceptance\n- ...\n\n## Non-goals\n- ...`}
+            />
+
+            <form className="mt-4 space-y-3" onSubmit={props.onRevisePrd}>
+              <textarea
+                className={FIELD_CLASS}
+                rows={4}
+                placeholder="refresh the PRD with a narrower scope, updated acceptance, or a clarified decision..."
+                value={props.revisionInstruction}
+                onChange={(event) =>
+                  props.onRevisionInstructionChange(event.target.value)
+                }
+              />
+
+              <div className="flex flex-wrap gap-3">
+                <ActionButton
+                  type="submit"
+                  disabled={
+                    props.productActionsDisabled ||
+                    props.busyAction === "revise-prd" ||
+                    props.revisionInstruction.trim().length === 0
+                  }
+                >
+                  {props.busyAction === "revise-prd"
+                    ? "refreshing..."
+                    : "refresh_prd"}
+                </ActionButton>
+
+                <GhostButton
+                  onClick={props.onApprovePrd}
+                  disabled={
+                    props.productActionsDisabled ||
+                    props.busyAction === "approve-prd" ||
+                    !props.plan
+                  }
+                >
+                  {props.busyAction === "approve-prd"
+                    ? "approving..."
+                    : props.approvedPlan &&
+                        props.plan &&
+                        props.approvedPlan.id === props.plan.id
+                      ? "approved"
+                      : "approve_prd"}
+                </GhostButton>
+              </div>
+            </form>
+          </section>
+
+          {props.plan ? (
+            <>
+              <section className={cx(INNER_CARD_CLASS, "p-5")}>
+                <div className="text-xs uppercase tracking-[0.2em] text-white/38">
+                  current_prd_summary
+                </div>
+                <p className="mt-3 font-body text-sm leading-7 text-white/74">
+                  {props.plan.summary}
+                </p>
+              </section>
+
+              <div className="grid gap-4 lg:grid-cols-3">
+                <PlanCluster title="scope" items={props.plan.scope} />
+                <PlanCluster title="acceptance" items={props.plan.acceptance} />
+                <PlanCluster title="non_goals" items={props.plan.nonGoals} />
+              </div>
+            </>
+          ) : (
+            <EmptyGlassState>
+              Keep shaping the product files, then draft the first repo-local PRD from them.
+            </EmptyGlassState>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function CodeModePanel(props: {
+  project: ProjectWorkspace["project"];
+  plan: ProjectWorkspace["plan"];
+  approvedPlan: ProjectWorkspace["approvedPlan"];
+  queuedTasks: Task[];
+  blockedTasks: Task[];
+  staleOpenTasks: Task[];
+  reviewTasks: Task[];
+  reviewBlockedTaskRuns: Array<{ task: Task; run: Run | null }>;
+  highRiskQueuedTasks: Task[];
+  nextTask: Task | null;
+  featuredRun: Run | null;
+  recentHistoryRuns: Run[];
+  runButtonDisabled: boolean;
+  taskGenerationDisabled: boolean;
+  featuredRunPrepareAction: (() => void) | null;
+  busyAction: string | null;
+  queueMessage: ActionMessage | null;
+  runMessage: ActionMessage | null;
+  onGenerateTasks: () => void;
+  onRunNextTask: () => void;
+  onPrepareReview: (runId: string) => void;
+  onRerunTask: (taskId: string) => void;
+  onCopyToClipboard: (value: string, label: string) => void;
+}) {
+  return (
+    <div className="grid flex-1 gap-6 xl:grid-cols-[1.02fr_0.98fr]">
+      <section className={cx(PANEL_CLASS, "overflow-hidden")}>
+        <header className="border-b border-white/10 px-6 py-5">
+          <div className="font-display text-[20px] lowercase tracking-[0.08em] text-white md:text-[30px]">
+            runs_review_handoff
+          </div>
+        </header>
+
+        <div className="space-y-4 px-5 py-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-xs uppercase tracking-[0.22em] text-white/42">
+                run_status
+              </div>
+              <div className="mt-2 font-display text-lg lowercase tracking-[0.08em] text-white">
+                {props.featuredRun
+                  ? formatRunDisplayState(props.featuredRun)
+                  : "idle"}
+              </div>
+            </div>
+
+            <ActionButton
+              onClick={props.onRunNextTask}
+              disabled={props.runButtonDisabled}
+            >
+              {props.busyAction === "run-next-task"
+                ? "starting..."
+                : "run_next_task"}
+            </ActionButton>
+          </div>
+
+          {props.runMessage ? (
+            <InlineMessage tone={props.runMessage.tone}>
+              {props.runMessage.text}
+            </InlineMessage>
+          ) : null}
+
+          {props.featuredRun ? (
+            <RunFeedCard
+              run={props.featuredRun}
+              isPreparing={
+                props.busyAction === `prepare-review-${props.featuredRun.id}`
+              }
+              isRerunning={
+                props.busyAction === `rerun-task-${props.featuredRun.taskId}`
+              }
+              {...(props.featuredRunPrepareAction
+                ? {
+                    onPrepareReview: props.featuredRunPrepareAction,
+                  }
+                : {})}
+              {...(props.featuredRun.reviewStatus === "blocked" ||
+              props.featuredRun.reviewStatus === "failed"
+                ? {
+                    onRerunTask: () =>
+                      props.onRerunTask(props.featuredRun!.taskId),
+                  }
+                : {})}
+              onCopyToClipboard={props.onCopyToClipboard}
+            />
+          ) : (
+            <EmptyGlassState>
+              No run has started yet. Derive code tasks from the approved PRD, then launch the first one here.
+            </EmptyGlassState>
+          )}
+
+          <div className="space-y-3">
+            {props.recentHistoryRuns.length === 0 ? (
+              <EmptyGlassState>
+                Older runs will collect here after the first execution.
+              </EmptyGlassState>
+            ) : (
+              props.recentHistoryRuns.map((run) => (
+                <RunFeedCard
+                  key={run.id}
+                  compact
+                  run={run}
+                  isPreparing={props.busyAction === `prepare-review-${run.id}`}
+                  isRerunning={
+                    props.busyAction === `rerun-task-${run.taskId}`
+                  }
+                  {...(run.status === "completed" &&
+                  run.reviewStatus !== "prepared"
+                    ? {
+                        onPrepareReview: () => props.onPrepareReview(run.id),
+                      }
+                    : {})}
+                  {...(run.reviewStatus === "blocked" ||
+                  run.reviewStatus === "failed"
+                    ? {
+                        onRerunTask: () => props.onRerunTask(run.taskId),
+                      }
+                    : {})}
+                  onCopyToClipboard={props.onCopyToClipboard}
+                />
+              ))
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section className={cx(PANEL_CLASS, "overflow-hidden")}>
+        <header className="border-b border-white/10 px-6 py-5">
+          <div className="font-display text-[20px] lowercase tracking-[0.08em] text-white md:text-[30px]">
+            code_queue
+          </div>
+        </header>
+
+        <div className="space-y-4 px-5 py-5">
+          {props.queueMessage ? (
+            <InlineMessage tone={props.queueMessage.tone}>
+              {props.queueMessage.text}
+            </InlineMessage>
+          ) : null}
+
+          {props.staleOpenTasks.length > 0 ? (
+            <InlineMessage tone="error">
+              The approved PRD changed after some open tasks were derived. Refresh open tasks to reconcile the queue without rewriting completed or review work.
+            </InlineMessage>
+          ) : null}
+
+          <div className={cx(INNER_CARD_CLASS, "p-5")}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-xs uppercase tracking-[0.2em] text-white/42">
+                  queue_source
+                </div>
+                <div className="mt-2 font-display text-lg lowercase tracking-[0.08em] text-white">
+                  {props.approvedPlan
+                    ? `approved_prd_v${props.approvedPlan.versionNumber}`
+                    : props.plan
+                      ? "waiting_for_prd_approval"
+                      : "waiting_for_prd"}
+                </div>
+              </div>
+
+              <ActionButton
+                onClick={props.onGenerateTasks}
+                disabled={props.taskGenerationDisabled}
+              >
+                {props.busyAction === "generate-tasks"
+                  ? "deriving..."
+                  : props.staleOpenTasks.length > 0
+                    ? "refresh_open_tasks"
+                    : props.queuedTasks.length > 0 ||
+                        props.blockedTasks.length > 0 ||
+                        props.reviewTasks.length > 0
+                      ? "derive_tasks_again"
+                      : "derive_tasks"}
+              </ActionButton>
+            </div>
+
+            <p className="mt-4 font-body text-sm leading-7 text-white/65">
+              Code mode only derives work from the approved repo-local PRD. Open work can drift; completed or review work stays preserved.
+            </p>
+          </div>
+
+          <div className={cx(INNER_CARD_CLASS, "p-5")}>
+            <div className="text-xs uppercase tracking-[0.2em] text-white/42">
+              next_runnable_task
+            </div>
+            <div className="mt-3 font-display text-lg lowercase tracking-[0.08em] text-white">
+              {props.nextTask ? props.nextTask.title : "nothing_runnable_right_now"}
+            </div>
+            <p className="mt-3 font-body text-sm leading-7 text-white/68">
+              {props.nextTask
+                ? props.nextTask.description
+                : props.staleOpenTasks.length > 0
+                  ? "Some open tasks are flagged from an older PRD version, so Scratch Pad is waiting for you to refresh affected work before the next run."
+                  : props.highRiskQueuedTasks.length > 0
+                    ? "The remaining aligned queued work is high risk, so it stays visible until you explicitly review it."
+                    : "Derive tasks or unblock existing work to see the next action item here."}
+            </p>
+          </div>
+
+          <div className={cx(INNER_CARD_CLASS, "p-5")}>
+            <div className="grid gap-3 sm:grid-cols-5">
+              <QueueCount label="queued" value={props.queuedTasks.length} />
+              <QueueCount label="maybe_stale" value={props.staleOpenTasks.length} />
+              <QueueCount label="review" value={props.reviewTasks.length} />
+              <QueueCount
+                label="review_blocked"
+                value={props.reviewBlockedTaskRuns.length}
+              />
+              <QueueCount label="blocked" value={props.blockedTasks.length} />
+            </div>
+
+            <div className="mt-5 space-y-3">
+              {props.queuedTasks.slice(0, 4).map((task) => (
+                <TaskPreviewCard key={task.id} task={task} />
+              ))}
+
+              {props.queuedTasks.length === 0 &&
+              props.reviewTasks.length === 0 &&
+              props.reviewBlockedTaskRuns.length === 0 &&
+              props.blockedTasks.length === 0 ? (
+                <EmptyGlassState>
+                  The queue will appear here once tasks are derived from the approved PRD.
+                </EmptyGlassState>
+              ) : null}
+
+              {props.reviewTasks.slice(0, 1).map((task) => (
+                <TaskPreviewCard key={task.id} task={task} />
+              ))}
+
+              {props.reviewBlockedTaskRuns.slice(0, 2).map((entry) => {
+                const blockedRun = entry.run;
+
+                return (
+                  <ReviewBlockedTaskCard
+                    key={entry.task.id}
+                    task={entry.task}
+                    run={blockedRun}
+                    isPreparing={
+                      blockedRun
+                        ? props.busyAction === `prepare-review-${blockedRun.id}`
+                        : false
+                    }
+                    isRerunning={
+                      props.busyAction === `rerun-task-${entry.task.id}`
+                    }
+                    onRerunTask={() => props.onRerunTask(entry.task.id)}
+                    {...(blockedRun
+                      ? {
+                          onPrepareReview: () =>
+                            props.onPrepareReview(blockedRun.id),
+                        }
+                      : {})}
+                  />
+                );
+              })}
+
+              {props.blockedTasks.slice(0, 2).map((task) => (
+                <TaskPreviewCard key={task.id} task={task} />
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ProductDocumentEditor(props: {
+  title: string;
+  path: string;
+  value: string;
+  placeholder: string;
+  rows: number;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <section className="rounded-[18px] border border-white/10 bg-white/[0.04] p-4">
+      <div className="font-display text-base lowercase tracking-[0.08em] text-white">
+        {props.title}
+      </div>
+      <div className="mt-2 break-all font-body text-xs leading-6 text-white/48">
+        {props.path}
+      </div>
+
+      <textarea
+        className={cx(FIELD_CLASS, "mt-4 font-mono text-[13px] leading-7")}
+        rows={props.rows}
+        value={props.value}
+        placeholder={props.placeholder}
+        onChange={(event) => props.onChange(event.target.value)}
+      />
+    </section>
+  );
+}
+
+function RepoFileBadge(props: { label: string; path: string }) {
+  return (
+    <div className="rounded-[16px] border border-white/10 bg-black/20 px-4 py-3">
+      <div className="text-xs uppercase tracking-[0.2em] text-white/42">
+        {props.label}
+      </div>
+      <div className="mt-2 break-all font-body text-sm leading-7 text-white/76">
+        {props.path}
+      </div>
+    </div>
   );
 }
 
@@ -1753,7 +2408,12 @@ function TaskPreviewCard(props: { task: Task }) {
         <div className={cx("font-display text-base lowercase tracking-[0.08em]", tone)}>
           {props.task.orderIndex + 1}. {props.task.title}
         </div>
-        <Badge>{props.task.status}</Badge>
+        <div className="flex flex-wrap gap-2">
+          <Badge>{props.task.status}</Badge>
+          {props.task.driftStatus !== "aligned" ? (
+            <Badge>{props.task.driftStatus}</Badge>
+          ) : null}
+        </div>
       </div>
       <p className="mt-3 font-body text-sm leading-7 text-white/64">
         {truncateText(props.task.description, 180)}
@@ -1762,14 +2422,86 @@ function TaskPreviewCard(props: { task: Task }) {
   );
 }
 
+function ReviewBlockedTaskCard(props: {
+  task: Task;
+  run: Run | null;
+  onPrepareReview?: (() => void) | undefined;
+  onRerunTask: () => void;
+  isPreparing?: boolean;
+  isRerunning?: boolean;
+}) {
+  return (
+    <article className="rounded-[18px] border border-amber-300/25 bg-amber-500/10 px-4 py-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="font-display text-base lowercase tracking-[0.08em] text-amber-100">
+          {props.task.orderIndex + 1}. {props.task.title}
+        </div>
+        <Badge>review_blocked</Badge>
+      </div>
+
+      <p className="mt-3 font-body text-sm leading-7 text-amber-50/90">
+        {props.run?.reviewFailureReason ??
+          "Review handoff is blocked for this completed task. Retry review prep or re-run the task to keep moving."}
+      </p>
+
+      {props.run?.finishedAt ? (
+        <p className="mt-2 font-body text-sm leading-7 text-amber-50/75">
+          latest_run / completed {formatTimestamp(props.run.finishedAt)}
+        </p>
+      ) : null}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        {props.onPrepareReview ? (
+          <GhostButton
+            onClick={props.onPrepareReview}
+            disabled={Boolean(props.isPreparing || props.isRerunning)}
+          >
+            {props.isPreparing ? "retrying_review..." : "retry_review_prep"}
+          </GhostButton>
+        ) : null}
+
+        <GhostButton
+          onClick={props.onRerunTask}
+          disabled={Boolean(props.isPreparing || props.isRerunning)}
+        >
+          {props.isRerunning ? "starting_rerun..." : "re_run_task"}
+        </GhostButton>
+      </div>
+    </article>
+  );
+}
+
 function RunFeedCard(props: {
   run: Run;
   compact?: boolean;
-  onPrepareReview?: () => void;
+  onPrepareReview?: (() => void) | undefined;
+  onRerunTask?: (() => void) | undefined;
+  onCopyToClipboard?: ((value: string, label: string) => void) | undefined;
   isPreparing?: boolean;
+  isRerunning?: boolean;
 }) {
+  const changedFilesCount = getReviewChangedFileCount(props.run);
+  const branchName = props.run.reviewBranchName;
+  const copyToClipboard = props.onCopyToClipboard;
+  const checkoutCommand = branchName ? buildCheckoutCommand(branchName) : null;
+  const copyBranchHandler =
+    branchName && copyToClipboard
+      ? () => copyToClipboard(branchName, "Branch name")
+      : null;
+  const copyCheckoutHandler =
+    checkoutCommand && copyToClipboard
+      ? () => copyToClipboard(checkoutCommand, "Checkout command")
+      : null;
+  const cardToneClass =
+    props.run.reviewStatus === "prepared"
+      ? "border-emerald-300/25 bg-emerald-500/10"
+      : props.run.reviewStatus === "blocked" ||
+          props.run.reviewStatus === "failed"
+        ? "border-amber-300/25 bg-amber-500/10"
+        : "border-white/10 bg-white/[0.05]";
+
   return (
-    <article className="rounded-[18px] border border-white/10 bg-white/[0.05] px-4 py-4">
+    <article className={cx("rounded-[18px] border px-4 py-4", cardToneClass)}>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="font-display text-base lowercase tracking-[0.08em] text-white">
           {props.run.taskTitle}
@@ -1778,6 +2510,8 @@ function RunFeedCard(props: {
       </div>
 
       <div className="mt-3 space-y-2 font-body text-sm leading-7 text-white/64">
+        <p>run_status / {props.run.status}</p>
+        <p>review_handoff / {formatReviewHandoffStatus(props.run.reviewStatus)}</p>
         <p>adapter / {formatAdapterLabel(props.run.adapter)}</p>
         <p>started / {formatTimestamp(props.run.startedAt)}</p>
         {!props.compact && props.run.finishedAt ? (
@@ -1794,11 +2528,110 @@ function RunFeedCard(props: {
         ) : null}
       </div>
 
-      {props.onPrepareReview ? (
+      {props.run.reviewStatus === "prepared" ? (
+        <div className="mt-4 rounded-[18px] border border-emerald-300/20 bg-emerald-500/10 px-4 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-xs uppercase tracking-[0.2em] text-emerald-100/75">
+                review_prepared
+              </div>
+              <div className="mt-2 font-display text-base lowercase tracking-[0.08em] text-emerald-50">
+                local_review_handoff_ready
+              </div>
+            </div>
+            <Badge>local_only</Badge>
+          </div>
+
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <ReviewMeta label="branch" value={props.run.reviewBranchName ?? "not_saved"} />
+            <ReviewMeta
+              label="changed_files"
+              value={String(changedFilesCount)}
+            />
+            <ReviewMeta
+              label="diff_stats"
+              value={formatDiffStatsLabel(props.run)}
+            />
+            <ReviewMeta
+              label="handoff_status"
+              value={formatReviewHandoffStatus(props.run.reviewStatus)}
+            />
+          </div>
+
+          {props.run.reviewSummary ? (
+            <div className="mt-4 rounded-[16px] border border-white/10 bg-black/20 px-4 py-3">
+              <div className="text-xs uppercase tracking-[0.2em] text-white/42">
+                review_summary
+              </div>
+              <p className="mt-3 whitespace-pre-wrap font-body text-sm leading-7 text-white/74">
+                {props.compact
+                  ? truncateText(props.run.reviewSummary, 220)
+                  : props.run.reviewSummary}
+              </p>
+            </div>
+          ) : null}
+
+          <p className="mt-4 font-body text-sm leading-7 text-emerald-50/80">
+            Local-only handoff. Scratch Pad did not push anything and did not open a pull request.
+          </p>
+
+          {!props.compact ? (
+            <div className="mt-4 flex flex-wrap gap-2">
+              <GhostButton
+                {...(copyBranchHandler ? { onClick: copyBranchHandler } : {})}
+                disabled={!copyBranchHandler}
+              >
+                copy_branch
+              </GhostButton>
+              <GhostButton
+                {...(copyCheckoutHandler
+                  ? { onClick: copyCheckoutHandler }
+                  : {})}
+                disabled={!copyCheckoutHandler}
+              >
+                copy_git_checkout
+              </GhostButton>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {props.run.reviewStatus === "blocked" || props.run.reviewStatus === "failed" ? (
+        <div className="mt-4 rounded-[18px] border border-amber-300/20 bg-amber-500/10 px-4 py-4">
+          <div className="text-xs uppercase tracking-[0.2em] text-amber-100/75">
+            review_handoff_needs_attention
+          </div>
+          <p className="mt-3 font-body text-sm leading-7 text-amber-50/90">
+            {props.run.reviewFailureReason ??
+              "Review handoff did not complete for this run."}
+          </p>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            {props.onPrepareReview ? (
+              <GhostButton
+                onClick={props.onPrepareReview}
+                disabled={Boolean(props.isPreparing || props.isRerunning)}
+              >
+                {props.isPreparing ? "retrying_review..." : "retry_review_prep"}
+              </GhostButton>
+            ) : null}
+            {props.onRerunTask ? (
+              <GhostButton
+                onClick={props.onRerunTask}
+                disabled={Boolean(props.isPreparing || props.isRerunning)}
+              >
+                {props.isRerunning ? "starting_rerun..." : "re_run_task"}
+              </GhostButton>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {props.onPrepareReview && props.run.reviewStatus === "not_started" ? (
         <div className="mt-4">
           <GhostButton
             onClick={props.onPrepareReview}
-            disabled={Boolean(props.isPreparing)}
+            disabled={Boolean(props.isPreparing || props.isRerunning)}
           >
             {props.isPreparing ? "preparing_review..." : "prepare_review"}
           </GhostButton>
@@ -1808,11 +2641,24 @@ function RunFeedCard(props: {
   );
 }
 
+function ReviewMeta(props: { label: string; value: string }) {
+  return (
+    <div className="rounded-[16px] border border-white/10 bg-black/20 px-4 py-3">
+      <div className="text-xs uppercase tracking-[0.2em] text-white/42">
+        {props.label}
+      </div>
+      <div className="mt-2 break-all font-body text-sm leading-7 text-white/78">
+        {props.value}
+      </div>
+    </div>
+  );
+}
+
 function ActionButton(props: {
   children: ReactNode;
   disabled?: boolean;
   type?: "button" | "submit";
-  onClick?: () => void;
+  onClick?: (() => void) | undefined;
 }) {
   return (
     <button
@@ -1829,7 +2675,7 @@ function ActionButton(props: {
 function GhostButton(props: {
   children: ReactNode;
   disabled?: boolean;
-  onClick?: () => void;
+  onClick?: (() => void) | undefined;
 }) {
   return (
     <button
@@ -1895,12 +2741,35 @@ function inferScreenFromWorkspace(workspace: ProjectWorkspace | null): Screen {
   return workspace.currentStage === "project" ? "projects" : "command";
 }
 
+function buildOptimisticWorkspace(
+  project: ProjectWorkspace["project"],
+): ProjectWorkspace {
+  const currentStage: ProjectWorkspace["currentStage"] =
+    project.repoPath && project.preferredAdapter ? "scratch" : "project";
+
+  return {
+    project,
+    currentStage,
+    notes: [],
+    productContext: null,
+    plan: null,
+    approvedPlan: null,
+    tasks: [],
+    runs: [],
+  };
+}
+
 function buildProjectSynopsis(
   projectName: string | null,
   notes: ProjectWorkspace["notes"],
   plan: ProjectWorkspace["plan"],
+  productContext: ProjectWorkspace["productContext"],
 ) {
-  const source = plan?.summary ?? notes[0]?.content ?? FALLBACK_PROJECT_SUMMARY;
+  const source =
+    plan?.summary ??
+    getProductContextSynopsis(productContext) ??
+    notes[0]?.content ??
+    FALLBACK_PROJECT_SUMMARY;
 
   return truncateText(
     source.trim().length > 0
@@ -1908,6 +2777,27 @@ function buildProjectSynopsis(
       : `${projectName ?? "scratch_pad"} is ready for its first note.`,
     290,
   );
+}
+
+function getProductContextSynopsis(
+  productContext: ProjectWorkspace["productContext"],
+) {
+  if (!productContext) {
+    return null;
+  }
+
+  const candidate = productContext.prd.content
+    .split("\n")
+    .map((line) => line.trim())
+    .find(
+      (line) =>
+        line.length > 0 &&
+        !line.startsWith("#") &&
+        !line.startsWith("-") &&
+        !line.startsWith("##"),
+    );
+
+  return candidate ?? null;
 }
 
 function formatTimestamp(value: string) {
@@ -1935,8 +2825,16 @@ function formatAuthenticatedLabel(value: AdapterStatus["authenticated"]) {
 }
 
 function formatRunDisplayState(run: Run) {
-  if (run.reviewPreparedAt) {
+  if (run.reviewStatus === "prepared") {
     return "review_prepared";
+  }
+
+  if (run.reviewStatus === "blocked") {
+    return "review_blocked";
+  }
+
+  if (run.reviewStatus === "failed") {
+    return "review_failed";
   }
 
   if (run.status === "starting" || run.status === "running") {
@@ -1975,15 +2873,19 @@ function buildPrimaryStatusSummary(input: {
   project: ProjectWorkspace["project"];
   currentStage: ProjectWorkspace["currentStage"];
   notes: ProjectWorkspace["notes"];
+  productContext: ProjectWorkspace["productContext"];
   plan: ProjectWorkspace["plan"];
+  approvedPlan: ProjectWorkspace["approvedPlan"];
   queuedTasks: Task[];
   blockedTasks: Task[];
+  staleOpenTaskCount: number;
   reviewTasks: Task[];
+  reviewBlockedCount: number;
   nextTask: Task | null;
   featuredRun: Run | null;
 }) {
   const completedReviewRun =
-    input.featuredRun?.reviewPreparedAt ? input.featuredRun : null;
+    input.featuredRun?.reviewStatus === "prepared" ? input.featuredRun : null;
 
   if (completedReviewRun) {
     const changedFilesCount =
@@ -2017,6 +2919,29 @@ function buildPrimaryStatusSummary(input: {
     };
   }
 
+  if (
+    input.featuredRun &&
+    (input.featuredRun.reviewStatus === "blocked" ||
+      input.featuredRun.reviewStatus === "failed")
+  ) {
+    return {
+      statusLabel: "review_blocked",
+      title: input.featuredRun.taskTitle,
+      detail:
+        input.featuredRun.reviewFailureReason ??
+        "The latest run completed, but review handoff is still blocked. Retry review prep or re-run the task from the review area.",
+    };
+  }
+
+  if (input.reviewBlockedCount > 0) {
+    return {
+      statusLabel: "review_blocked",
+      title: "review_handoff_blocked",
+      detail:
+        "A completed task is still waiting because review handoff is blocked. Retry review prep or re-run the task from the main workflow.",
+    };
+  }
+
   if (input.featuredRun?.status === "completed") {
     return {
       statusLabel: "run_completed",
@@ -2047,6 +2972,15 @@ function buildPrimaryStatusSummary(input: {
     };
   }
 
+  if (input.staleOpenTaskCount > 0) {
+    return {
+      statusLabel: "open_tasks_need_refresh",
+      title: "approved_prd_changed",
+      detail:
+        "The approved repo-local PRD changed after some open tasks were derived. Refresh affected open tasks in Code mode before starting another run.",
+    };
+  }
+
   if (input.reviewTasks.length > 0) {
     return {
       statusLabel: "review_ready",
@@ -2065,39 +2999,44 @@ function buildPrimaryStatusSummary(input: {
     };
   }
 
-  if (input.plan?.approved) {
+  if (input.approvedPlan) {
     return {
-      statusLabel: "ready_to_generate_tasks",
-      title: "approved_prd_locked_in",
+      statusLabel: "ready_for_code_mode",
+      title: "approved_repo_prd_locked_in",
       detail:
-        "The approved plan is in place. Generate the task queue to move from planning into execution.",
+        "The approved repo-local PRD is in place. Code mode can derive or refresh open tasks from that approved scope whenever you are ready.",
     };
   }
 
   if (input.plan) {
     return {
       statusLabel: "plan_needs_approval",
-      title: "review_the_current_prd",
+      title: "review_the_current_repo_prd",
       detail:
-        "Your draft PRD is ready. Approve it when the scope is right, or revise it before unlocking task generation.",
-    };
+        "Your draft PRD is ready in the repo-local product context. Refresh or edit it until the scope is right, then approve it to unlock Code mode task derivation.",
+      };
   }
 
-  if (input.notes.length > 0) {
+  if (
+    input.notes.length > 0 ||
+    input.productContext?.features.content.trim().length ||
+    input.productContext?.decisions.content.trim().length ||
+    input.productContext?.openQuestions.content.trim().length
+  ) {
     return {
-      statusLabel: "ready_to_generate_prd",
-      title: "scratch_notes_captured",
+      statusLabel: "ready_to_draft_prd",
+      title: "product_context_is_forming",
       detail:
-        "You already have the raw idea in place. Generate the PRD to turn those notes into an approved execution path.",
+        "Product mode has enough context to draft or update the repo-local PRD. Shape the files, then approve the version that Code mode should execute.",
     };
   }
 
   if (input.project.repoPath && input.project.preferredAdapter) {
     return {
-      statusLabel: "ready_for_first_note",
+      statusLabel: "ready_for_product_shaping",
       title: "project_setup_saved",
       detail:
-        "Project setup is complete. Add the first scratch note to start the core flow on this screen.",
+        "Project setup is complete. Start Product mode with notes, candidate features, decisions, and open questions to build the repo-local PRD.",
     };
   }
 
@@ -2111,6 +3050,28 @@ function buildPrimaryStatusSummary(input: {
     title: "finish_the_basics",
     detail: `Add ${missingSetup.join(" + ")} to unlock the approved flow and make this project runnable.`,
   };
+}
+
+function formatReviewHandoffStatus(value: ReviewHandoffStatus) {
+  return value;
+}
+
+function getReviewChangedFileCount(run: Run) {
+  return run.reviewChangedFiles?.length ?? run.reviewDiffStats?.filesChanged ?? 0;
+}
+
+function formatDiffStatsLabel(run: Run) {
+  const stats = run.reviewDiffStats;
+
+  if (!stats) {
+    return "not_saved";
+  }
+
+  return `+${stats.insertions} / -${stats.deletions}`;
+}
+
+function buildCheckoutCommand(branchName: string) {
+  return `git checkout ${branchName}`;
 }
 
 function formatAdapterLabel(value: PreferredAdapter) {

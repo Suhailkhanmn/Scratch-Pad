@@ -20,7 +20,11 @@ import {
   getLatestRunByTaskId,
   updateRunStatus,
 } from "./runs.js";
-import { listTasksByProjectId } from "./tasks.js";
+import {
+  getTaskById,
+  listTasksByProjectId,
+  updateTaskStatus,
+} from "./tasks.js";
 
 const execFileAsync = promisify(execFile);
 const RUN_LOG_DIRECTORY = resolve(process.cwd(), "data/run-logs");
@@ -31,6 +35,48 @@ const HELP_MAX_BUFFER_BYTES = 64 * 1024;
 export async function startNextTaskRun(
   database: DatabaseSync,
   project: Project,
+): Promise<{
+  run: ReturnType<typeof createRun>;
+  task: Task;
+  message: string;
+}> {
+  const taskSelection = selectNextRunnableTask(database, project.id);
+
+  if (!taskSelection.task) {
+    throw new Error(taskSelection.message);
+  }
+
+  return startTaskRun(database, project, taskSelection.task);
+}
+
+export async function rerunTask(
+  database: DatabaseSync,
+  project: Project,
+  taskId: string,
+): Promise<{
+  run: ReturnType<typeof createRun>;
+  task: Task;
+  message: string;
+}> {
+  const task = getTaskById(database, taskId);
+
+  if (!task || task.projectId !== project.id) {
+    throw new Error("Task not found for this project.");
+  }
+
+  if (task.status === "blocked") {
+    throw new Error(
+      "This task is blocked and cannot be re-run until it is manually reviewed.",
+    );
+  }
+
+  return startTaskRun(database, project, task);
+}
+
+async function startTaskRun(
+  database: DatabaseSync,
+  project: Project,
+  task: Task,
 ): Promise<{
   run: ReturnType<typeof createRun>;
   task: Task;
@@ -54,13 +100,6 @@ export async function startNextTaskRun(
     throw new Error("Select a preferred adapter before running a task.");
   }
 
-  const taskSelection = selectNextRunnableTask(database, project.id);
-
-  if (!taskSelection.task) {
-    throw new Error(taskSelection.message);
-  }
-
-  const task = taskSelection.task;
   const prompt = buildExecutionPrompt(project, task);
   const invocation = await prepareAdapterInvocation(
     project.preferredAdapter,
@@ -119,6 +158,13 @@ export async function startNextTaskRun(
       id: run.id,
       status,
     });
+
+    if (status === "completed") {
+      updateTaskStatus(database, {
+        id: task.id,
+        status: "review",
+      });
+    }
   };
 
   child.on("error", (error) => {
@@ -161,9 +207,15 @@ function selectNextRunnableTask(
 ): { task: Task | null; message: string } {
   const tasks = listTasksByProjectId(database, projectId);
   let hasPendingHighRiskTask = false;
+  let hasPendingStaleTask = false;
 
   for (const task of tasks) {
     if (task.status !== "queued") {
+      continue;
+    }
+
+    if (task.driftStatus !== "aligned") {
+      hasPendingStaleTask = true;
       continue;
     }
 
@@ -189,6 +241,14 @@ function selectNextRunnableTask(
       task: null,
       message:
         "No runnable queued tasks remain. High-risk tasks need manual review before they can run.",
+    };
+  }
+
+  if (hasPendingStaleTask) {
+    return {
+      task: null,
+      message:
+        "The approved PRD changed, so the remaining open tasks need to be refreshed before another code run starts.",
     };
   }
 

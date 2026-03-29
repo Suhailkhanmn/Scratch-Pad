@@ -3,11 +3,14 @@ import {
   ApprovePrdInputSchema,
   CreateProjectInputSchema,
   CreateScratchNoteInputSchema,
+  DraftPrdInputSchema,
   HealthResponseSchema,
   OpenCodexAppResultSchema,
   OpenProjectRepoInputSchema,
   PlanMutationResultSchema,
   PrepareReviewResultSchema,
+  ProductContextMutationResultSchema,
+  ProductContextUpdateInputSchema,
   ProjectSchema,
   ProjectWorkspaceSchema,
   RevisePrdInputSchema,
@@ -21,6 +24,8 @@ import {
   type PrepareReviewResult,
   type PreferredAdapter,
   type OpenCodexAppResult,
+  type ProductContext,
+  type ProductContextMutationResult,
   type Project,
   type ProjectWorkspace,
   type Run,
@@ -133,16 +138,72 @@ export async function deleteScratchNote(noteId: string) {
   });
 }
 
-export async function generatePrd(projectId: string) {
+export async function saveProductContext(
+  projectId: string,
+  input: {
+    prd?: string;
+    features?: string;
+    decisions?: string;
+    openQuestions?: string;
+  },
+) {
+  const payload = ProductContextUpdateInputSchema.parse(input);
+
+  return request(`/api/projects/${projectId}/save-product-context`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+    headers: jsonHeaders,
+    schema: ProductContextMutationResultSchema,
+  });
+}
+
+export async function shapeProduct(
+  projectId: string,
+  input: {
+    prd?: string;
+    features?: string;
+    decisions?: string;
+    openQuestions?: string;
+  },
+) {
+  const payload = ProductContextUpdateInputSchema.parse(input);
+
+  return request(`/api/projects/${projectId}/shape-product`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+    headers: jsonHeaders,
+    schema: ProductContextMutationResultSchema,
+  });
+}
+
+export async function generatePrd(
+  projectId: string,
+  input: {
+    prd?: string;
+    features?: string;
+    decisions?: string;
+    openQuestions?: string;
+  } = {},
+) {
+  const payload = DraftPrdInputSchema.parse(input);
+
   return request(`/api/projects/${projectId}/generate-prd`, {
     method: "POST",
+    body: JSON.stringify(payload),
+    headers: jsonHeaders,
     schema: PlanMutationResultSchema,
   });
 }
 
 export async function revisePrd(
   projectId: string,
-  input: { instruction: string },
+  input: {
+    instruction: string;
+    prd?: string;
+    features?: string;
+    decisions?: string;
+    openQuestions?: string;
+  },
 ) {
   const payload = RevisePrdInputSchema.parse(input);
 
@@ -186,6 +247,13 @@ export async function prepareReview(runId: string) {
   return request(`/api/runs/${runId}/prepare-review`, {
     method: "POST",
     schema: PrepareReviewResultSchema,
+  });
+}
+
+export async function rerunTask(taskId: string) {
+  return request(`/api/tasks/${taskId}/re-run`, {
+    method: "POST",
+    schema: RunNextTaskResultSchema,
   });
 }
 
@@ -236,6 +304,8 @@ export type {
   PlanMutationResult,
   PlanVersion,
   PrepareReviewResult,
+  ProductContext,
+  ProductContextMutationResult,
   Project,
   ProjectWorkspace,
   Run,

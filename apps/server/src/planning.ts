@@ -5,25 +5,46 @@ import type {
   ScratchNote,
 } from "@scratch-pad/shared";
 import { getAdapterStatuses } from "./adapters.js";
+import type {
+  ParsedFeaturesDocument,
+  ParsedProductContext,
+} from "./product-files.js";
 
 export type PlanDraft = Omit<
   PlanVersion,
-  "id" | "projectId" | "approved" | "createdAt"
+  | "id"
+  | "projectId"
+  | "versionNumber"
+  | "sourcePath"
+  | "bodyMarkdown"
+  | "contentHash"
+  | "approved"
+  | "createdAt"
 >;
+
+export type ProductShapingDraft = {
+  features: ParsedFeaturesDocument;
+  decisions: string[];
+  openQuestions: string[];
+};
 
 export async function buildGeneratedPlan(
   project: Project,
-  notes: ScratchNote[],
+  input: {
+    notes: ScratchNote[];
+    productContext: ParsedProductContext;
+  },
 ): Promise<{ draft: PlanDraft; message: string }> {
   const draft = buildPlanDraft({
     project,
-    notes,
+    notes: input.notes,
+    productContext: input.productContext,
   });
 
   return {
     draft,
     message: await buildPlanningMessage(
-      "generated",
+      "drafted",
       project.preferredAdapter,
     ),
   };
@@ -31,32 +52,107 @@ export async function buildGeneratedPlan(
 
 export async function buildRevisedPlan(
   project: Project,
-  notes: ScratchNote[],
-  currentPlan: PlanVersion,
-  instruction: string,
+  input: {
+    notes: ScratchNote[];
+    productContext: ParsedProductContext;
+    currentPlan: PlanVersion;
+    instruction: string;
+  },
 ): Promise<{ draft: PlanDraft; message: string }> {
   const draft = buildPlanDraft({
     project,
-    notes,
-    currentPlan,
-    revisionInstruction: instruction,
+    notes: input.notes,
+    productContext: input.productContext,
+    currentPlan: input.currentPlan,
+    revisionInstruction: input.instruction,
   });
 
   return {
     draft,
     message: await buildPlanningMessage(
-      "revised",
+      "refreshed",
       project.preferredAdapter,
     ),
+  };
+}
+
+export async function buildShapedProductContext(
+  project: Project,
+  notes: ScratchNote[],
+  currentProductContext: ParsedProductContext,
+): Promise<{ draft: ProductShapingDraft; message: string }> {
+  const orderedNotes = [...notes].sort((left, right) =>
+    left.createdAt.localeCompare(right.createdAt),
+  );
+  const noteFragments = orderedNotes.flatMap((note) =>
+    splitIntoFragments(note.content),
+  );
+  const currentSelected = currentProductContext.features.selected;
+  const currentCandidate = currentProductContext.features.candidate;
+  const currentDeferred = currentProductContext.features.deferred;
+  const derivedScopeItems = dedupe(
+    noteFragments
+      .map((fragment) => toScopeItem(fragment))
+      .filter((value): value is string => Boolean(value)),
+  );
+  const derivedDeferredItems = dedupe(
+    noteFragments
+      .filter((fragment) => isLikelyDeferredFeature(fragment))
+      .map((fragment) => toFeatureLabel(fragment))
+      .filter((value): value is string => Boolean(value)),
+  );
+  const selected = dedupe([
+    ...currentSelected,
+    ...derivedScopeItems.filter((item) => isLikelySelectedFeature(item, noteFragments)),
+  ]).slice(0, 6);
+  const deferred = dedupe([
+    ...currentDeferred,
+    ...derivedDeferredItems,
+  ]).slice(0, 6);
+  const selectedKeys = new Set(selected.map(toNormalizedKey));
+  const deferredKeys = new Set(deferred.map(toNormalizedKey));
+  const candidate = dedupe([
+    ...currentCandidate,
+    ...derivedScopeItems.filter((item) => {
+      const normalizedKey = toNormalizedKey(item);
+
+      return (
+        !selectedKeys.has(normalizedKey) && !deferredKeys.has(normalizedKey)
+      );
+    }),
+  ]).slice(0, 10);
+  const decisions = dedupe([
+    ...currentProductContext.decisions,
+    ...noteFragments
+      .map((fragment) => toDecisionItem(fragment))
+      .filter((value): value is string => Boolean(value)),
+  ]).slice(0, 8);
+  const openQuestions = dedupe([
+    ...currentProductContext.openQuestions,
+    ...orderedNotes.flatMap((note) => extractOpenQuestions(note.content)),
+  ]).slice(0, 8);
+
+  return {
+    draft: {
+      features: {
+        selected,
+        candidate,
+        deferred,
+      },
+      decisions,
+      openQuestions,
+    },
+    message: await buildPlanningMessage("shaped", project.preferredAdapter),
   };
 }
 
 function buildPlanDraft(input: {
   project: Project;
   notes: ScratchNote[];
+  productContext: ParsedProductContext;
   currentPlan?: PlanVersion;
   revisionInstruction?: string;
-}): Omit<PlanVersion, "id" | "projectId" | "approved" | "createdAt"> {
+}): PlanDraft {
   const orderedNotes = [...input.notes].sort((left, right) =>
     left.createdAt.localeCompare(right.createdAt),
   );
@@ -64,6 +160,11 @@ function buildPlanDraft(input: {
   const noteFragments = orderedNotes.flatMap((note) =>
     splitIntoFragments(note.content),
   );
+  const productFragments = dedupe([
+    ...input.productContext.features.selected,
+    ...input.productContext.features.candidate,
+    ...input.productContext.decisions,
+  ]);
   const currentPlanFragments = input.currentPlan
     ? [
         input.currentPlan.summary,
@@ -78,6 +179,7 @@ function buildPlanDraft(input: {
 
   const allFragments = dedupe([
     ...revisionFragments,
+    ...productFragments,
     ...noteFragments,
     ...currentPlanFragments,
   ]);
@@ -125,7 +227,7 @@ function buildPlanDraft(input: {
 }
 
 async function buildPlanningMessage(
-  action: "generated" | "revised",
+  action: "drafted" | "refreshed" | "shaped",
   preferredAdapter: PreferredAdapter,
 ) {
   if (!preferredAdapter) {
@@ -210,6 +312,88 @@ function buildFallbackNonGoals(revisionInstruction?: string) {
   }
 
   return base;
+}
+
+function isLikelySelectedFeature(
+  item: string,
+  noteFragments: string[],
+) {
+  const normalizedItem = toNormalizedKey(item);
+
+  return noteFragments.some((fragment) => {
+    const normalizedFragment = fragment.toLowerCase();
+
+    return (
+      normalizedFragment.includes(normalizedItem) &&
+      /\b(core|main|primary|must|need|required|v1|ship)\b/i.test(
+        normalizedFragment,
+      )
+    );
+  });
+}
+
+function isLikelyDeferredFeature(fragment: string) {
+  return /\b(later|future|defer|deferred|not now|not in v1|follow-up)\b/i.test(
+    fragment,
+  );
+}
+
+function toFeatureLabel(fragment: string) {
+  const scopeItem = toScopeItem(fragment);
+
+  if (scopeItem) {
+    return scopeItem;
+  }
+
+  const normalizedFragment = normalizePlanningFragment(fragment);
+
+  if (!normalizedFragment) {
+    return null;
+  }
+
+  return toSentenceCase(normalizedFragment);
+}
+
+function toDecisionItem(fragment: string) {
+  const normalizedFragment = normalizePlanningFragment(fragment);
+
+  if (!normalizedFragment) {
+    return null;
+  }
+
+  if (/\blocal[- ]first\b|\brepo[- ]local\b|\bkeep .* local\b/i.test(normalizedFragment)) {
+    return "Keep product context and review handoff local to the repo.";
+  }
+
+  if (
+    /\bno cloud\b|\bno hosted\b|\bno sync\b|\bno collaboration\b|\bno github\b|\bno auto-push\b|\bno auto-merge\b/i.test(
+      normalizedFragment,
+    )
+  ) {
+    return toSentenceCase(normalizeNegativePhrase(normalizedFragment));
+  }
+
+  const nonGoal = toNonGoalItem(normalizedFragment);
+
+  if (nonGoal) {
+    return nonGoal;
+  }
+
+  if (/\b(clean branch|named branch|git branch|local review)\b/i.test(normalizedFragment)) {
+    return "Review handoff stays local and starts from a clean named branch.";
+  }
+
+  return null;
+}
+
+function extractOpenQuestions(value: string) {
+  return value
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && line.includes("?"))
+    .map((line) => normalizeQuestion(line))
+    .filter(Boolean);
 }
 
 function toScopeItem(fragment: string) {
@@ -509,6 +693,22 @@ function normalizeFreeformPhrase(value: string) {
     .replace(/^["'`]+|["'`]+$/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function normalizeQuestion(value: string) {
+  const normalizedValue = normalizeFreeformPhrase(value);
+
+  if (!normalizedValue) {
+    return "";
+  }
+
+  return normalizedValue.endsWith("?")
+    ? toSentenceCase(normalizedValue)
+    : `${toSentenceCase(normalizedValue)}?`;
+}
+
+function toNormalizedKey(value: string) {
+  return value.trim().toLowerCase();
 }
 
 function dedupe(values: string[]) {
