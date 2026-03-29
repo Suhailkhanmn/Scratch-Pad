@@ -1,0 +1,17 @@
+{
+  "name": "scratch-pad",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.0.0",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "scripts": {
+    "dev:web": "pnpm --filter @scratch-pad/web dev",
+    "dev:server": "pnpm --filter @scratch-pad/server dev",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "build:web": "pnpm --filter @scratch-pad/web build"
+  }
+}

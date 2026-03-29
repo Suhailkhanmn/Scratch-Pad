@@ -1,0 +1,43 @@
+@import url("https://fonts.googleapis.com/css2?family=Jura:wght@400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #f8f6f1;
+  color-scheme: dark;
+  background:
+    radial-gradient(circle at bottom left, rgba(155, 155, 155, 0.36), transparent 30%),
+    radial-gradient(circle at top center, rgba(255, 255, 255, 0.08), transparent 20%),
+    linear-gradient(180deg, #000000 0%, #4f4f4f 100%);
+  font-family: "Jura", "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(circle at bottom left, rgba(155, 155, 155, 0.34), transparent 28%),
+    linear-gradient(180deg, #000000 0%, #4f4f4f 100%);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+::selection {
+  background: rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+}

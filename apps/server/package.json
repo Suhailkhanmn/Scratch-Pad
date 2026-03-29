@@ -1,0 +1,21 @@
+{
+  "name": "@scratch-pad/server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --disable-warning=ExperimentalWarning --import tsx ./src/main.ts",
+    "start": "node --disable-warning=ExperimentalWarning --import tsx ./src/main.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@scratch-pad/shared": "workspace:*",
+    "fastify": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
+
