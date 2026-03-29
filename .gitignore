@@ -3,4 +3,6 @@ dist/
 .DS_Store
 *.tsbuildinfo
 apps/server/data/
-
+.env
+.env.local
+.env*.local
