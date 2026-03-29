@@ -2,8 +2,12 @@ import Fastify, { type FastifyError } from "fastify";
 import {
   AdapterStatusListSchema,
   ApprovePrdInputSchema,
+  CreateDirectoryInputSchema,
+  CreateDirectoryResultSchema,
   CreateProjectInputSchema,
   CreateScratchNoteInputSchema,
+  DirectoryBrowserQuerySchema,
+  DirectoryBrowserResultSchema,
   DraftPrdInputSchema,
   HealthResponseSchema,
   OpenCodexAppResultSchema,
@@ -12,6 +16,7 @@ import {
   PrepareReviewResultSchema,
   ProductContextMutationResultSchema,
   ProductContextUpdateInputSchema,
+  ProjectListSchema,
   ProjectParamsSchema,
   ProjectPlanSchema,
   ProjectWorkspaceSchema,
@@ -29,6 +34,7 @@ import {
 } from "@scratch-pad/shared";
 import { getAdapterStatuses, openRepoInCodexApp } from "./adapters.js";
 import { createDatabaseContext } from "./db.js";
+import { browseDirectories, createDirectory } from "./filesystem.js";
 import {
   createScratchNote,
   deleteScratchNote,
@@ -43,7 +49,13 @@ import {
   saveProjectProductContext,
   shapeProjectProductContext,
 } from "./product-context-service.js";
-import { createProject, getProjectById, updateProjectSetup } from "./projects.js";
+import {
+  createProject,
+  deleteProject,
+  getProjectById,
+  listProjects,
+  updateProjectSetup,
+} from "./projects.js";
 import { getProjectWorkspace } from "./project-workspace.js";
 import { prepareReviewForRun } from "./review-handoff.js";
 import { rerunTask, startNextTaskRun } from "./run-execution.js";
@@ -124,6 +136,56 @@ server.get("/adapters/status", async () =>
   AdapterStatusListSchema.parse(await getAdapterStatuses()),
 );
 
+server.get("/projects", async () =>
+  ProjectListSchema.parse(listProjects(database)),
+);
+
+server.get("/filesystem/directories", async (request, reply) => {
+  const parsedQuery = DirectoryBrowserQuerySchema.safeParse(request.query ?? {});
+
+  if (!parsedQuery.success) {
+    return reply.code(400).send({
+      message: "Invalid directory browser query.",
+      issues: parsedQuery.error.issues,
+    });
+  }
+
+  try {
+    return reply.send(
+      DirectoryBrowserResultSchema.parse(
+        browseDirectories(parsedQuery.data.path),
+      ),
+    );
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Could not browse directories.";
+
+    return reply.code(400).send({ message });
+  }
+});
+
+server.post("/filesystem/directories", async (request, reply) => {
+  const parsedBody = CreateDirectoryInputSchema.safeParse(request.body);
+
+  if (!parsedBody.success) {
+    return reply.code(400).send({
+      message: "Invalid create-folder payload.",
+      issues: parsedBody.error.issues,
+    });
+  }
+
+  try {
+    return reply.code(201).send(
+      CreateDirectoryResultSchema.parse(createDirectory(parsedBody.data)),
+    );
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Could not create the folder.";
+
+    return reply.code(400).send({ message });
+  }
+});
+
 server.post("/projects", async (request, reply) => {
   const parsedBody = CreateProjectInputSchema.safeParse(request.body);
 
@@ -158,6 +220,27 @@ server.get("/projects/:id", async (request, reply) => {
   }
 
   return reply.send(project);
+});
+
+server.delete("/projects/:id", async (request, reply) => {
+  const parsedParams = ProjectParamsSchema.safeParse(request.params);
+
+  if (!parsedParams.success) {
+    return reply.code(400).send({
+      message: "Invalid project id.",
+      issues: parsedParams.error.issues,
+    });
+  }
+
+  const deleted = deleteProject(database, parsedParams.data.id);
+
+  if (!deleted) {
+    return reply.code(404).send({
+      message: "Project not found.",
+    });
+  }
+
+  return reply.code(204).send();
 });
 
 server.get("/projects/:id/workspace", async (request, reply) => {

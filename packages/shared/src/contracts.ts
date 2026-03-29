@@ -106,6 +106,53 @@ export type Project = z.infer<typeof ProjectSchema>;
 
 export const ProjectListSchema = z.array(ProjectSchema);
 
+export const DirectoryEntrySchema = z.object({
+  name: z.string().min(1),
+  path: z.string().min(1),
+});
+
+export type DirectoryEntry = z.infer<typeof DirectoryEntrySchema>;
+
+export const DirectoryBrowserQuerySchema = z.object({
+  path: z.string().trim().min(1).optional(),
+});
+
+export type DirectoryBrowserQuery = z.infer<typeof DirectoryBrowserQuerySchema>;
+
+export const DirectoryBrowserResultSchema = z.object({
+  currentPath: z.string().min(1),
+  parentPath: z.string().min(1).nullable(),
+  directories: z.array(DirectoryEntrySchema),
+});
+
+export type DirectoryBrowserResult = z.infer<
+  typeof DirectoryBrowserResultSchema
+>;
+
+export const CreateDirectoryInputSchema = z.object({
+  parentPath: z.string().trim().min(1),
+  name: z
+    .string()
+    .trim()
+    .min(1)
+    .max(120)
+    .refine((value) => !/[\\/]/.test(value), {
+      message: "Folder name cannot include path separators.",
+    })
+    .refine((value) => value !== "." && value !== "..", {
+      message: "Folder name is not valid.",
+    }),
+});
+
+export type CreateDirectoryInput = z.infer<typeof CreateDirectoryInputSchema>;
+
+export const CreateDirectoryResultSchema = z.object({
+  path: z.string().min(1),
+  message: z.string().min(1),
+});
+
+export type CreateDirectoryResult = z.infer<typeof CreateDirectoryResultSchema>;
+
 export const CreateProjectInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
   preferredAdapter: PreferredAdapterSchema.optional().default(null),

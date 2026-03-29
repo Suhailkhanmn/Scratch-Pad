@@ -6,17 +6,23 @@ import {
   type ReactNode,
 } from "react";
 import type {
+  DirectoryBrowserResult,
   PreferredAdapter,
+  Project,
   ReviewHandoffStatus,
 } from "@scratch-pad/shared";
 import {
   ApiError,
   approvePrd,
+  browseDirectories,
+  createDirectory,
   createProject,
   createScratchNote,
+  deleteProject,
   deleteScratchNote,
   fetchAdapterStatuses,
   fetchHealth,
+  fetchProjects,
   fetchProjectWorkspace,
   generatePrd,
   generateTasks,
@@ -38,6 +44,16 @@ import {
 type ActionMessage = {
   tone: "default" | "error";
   text: string;
+};
+
+type DirectoryPickerState = {
+  open: boolean;
+  loading: boolean;
+  currentPath: string;
+  parentPath: string | null;
+  directories: DirectoryBrowserResult["directories"];
+  newFolderName: string;
+  error: string | null;
 };
 
 type HealthState =
@@ -77,6 +93,7 @@ export default function App() {
   const [adapterStatuses, setAdapterStatuses] = useState<AdapterStatusState>({
     status: "loading",
   });
+  const [projects, setProjects] = useState<Project[]>([]);
   const [workspace, setWorkspace] = useState<ProjectWorkspace | null>(null);
   const [screen, setScreen] = useState<Screen>("welcome");
   const [commandMode, setCommandMode] = useState<CommandMode>("product");
@@ -103,6 +120,16 @@ export default function App() {
   const [runMessage, setRunMessage] = useState<ActionMessage | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const previousActiveRunIdRef = useRef<string | null>(null);
+  const latestWorkspaceRequestIdRef = useRef(0);
+  const [directoryPicker, setDirectoryPicker] = useState<DirectoryPickerState>({
+    open: false,
+    loading: false,
+    currentPath: "",
+    parentPath: null,
+    directories: [],
+    newFolderName: "",
+    error: null,
+  });
 
   const project = workspace?.project ?? null;
   const notes = workspace?.notes ?? [];
@@ -156,11 +183,62 @@ export default function App() {
     setRunMessage(null);
   }
 
+  function clearSelectedProjectState(options?: {
+    screen?: Exclude<Screen, "command">;
+  }) {
+    latestWorkspaceRequestIdRef.current += 1;
+    setDirectoryPicker({
+      open: false,
+      loading: false,
+      currentPath: "",
+      parentPath: null,
+      directories: [],
+      newFolderName: "",
+      error: null,
+    });
+    setWorkspace(null);
+    setCommandMode("product");
+    setRepoPath("");
+    setSetupAdapter("");
+    setNewNoteContent("");
+    setEditingNoteId(null);
+    setEditingContent("");
+    setPrdDraft("");
+    setFeaturesDraft("");
+    setDecisionsDraft("");
+    setOpenQuestionsDraft("");
+    setRevisionInstruction("");
+    setScreen(options?.screen ?? "welcome");
+    clearActionMessages();
+    window.localStorage.removeItem(CURRENT_PROJECT_STORAGE_KEY);
+  }
+
+  function upsertProject(project: Project) {
+    setProjects((previousProjects) => {
+      const nextProjects = previousProjects.filter(
+        (currentProject) => currentProject.id !== project.id,
+      );
+
+      nextProjects.unshift(project);
+
+      return nextProjects.sort((left, right) =>
+        right.updatedAt.localeCompare(left.updatedAt),
+      );
+    });
+  }
+
+  async function loadProjects() {
+    const loadedProjects = await fetchProjects();
+    setProjects(loadedProjects);
+    return loadedProjects;
+  }
+
   function applyProjectWorkspace(
     nextWorkspace: ProjectWorkspace,
     options?: { syncProjectSetupFields?: boolean },
   ) {
     setWorkspace(nextWorkspace);
+    upsertProject(nextWorkspace.project);
     syncProductDraftFields(nextWorkspace.productContext);
 
     if (options?.syncProjectSetupFields ?? false) {
@@ -181,7 +259,12 @@ export default function App() {
       syncProjectSetupFields?: boolean;
     },
   ) {
+    const requestId = ++latestWorkspaceRequestIdRef.current;
     const loadedWorkspace = await fetchProjectWorkspace(projectId);
+
+    if (requestId !== latestWorkspaceRequestIdRef.current) {
+      return loadedWorkspace;
+    }
 
     applyProjectWorkspace(
       loadedWorkspace,
@@ -235,20 +318,7 @@ export default function App() {
   }
 
   function clearCurrentProject() {
-    setWorkspace(null);
-    setCommandMode("product");
-    setRepoPath("");
-    setSetupAdapter("");
-    setEditingNoteId(null);
-    setEditingContent("");
-    setPrdDraft("");
-    setFeaturesDraft("");
-    setDecisionsDraft("");
-    setOpenQuestionsDraft("");
-    setRevisionInstruction("");
-    setScreen("welcome");
-    clearActionMessages();
-    window.localStorage.removeItem(CURRENT_PROJECT_STORAGE_KEY);
+    clearSelectedProjectState({ screen: "welcome" });
   }
 
   async function handleCreateProject(event: FormEvent<HTMLFormElement>) {
@@ -269,11 +339,12 @@ export default function App() {
       setEditingNoteId(null);
       setEditingContent("");
       setRevisionInstruction("");
+      latestWorkspaceRequestIdRef.current += 1;
       applyProjectWorkspace(optimisticWorkspace, {
         syncProjectSetupFields: true,
       });
       setScreen(inferScreenFromWorkspace(optimisticWorkspace));
-      setProjectMessage(successMessage("Project created. Finish setup to continue."));
+      setProjectMessage(null);
 
       void loadProjectWorkspace(createdProject.id, {
         resetMessages: false,
@@ -281,8 +352,103 @@ export default function App() {
       }).catch((error) => {
         setProjectMessage(errorMessage(error));
       });
+      void loadProjects().catch(() => undefined);
     } catch (error) {
       setProjectMessage(errorMessage(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleSelectProject(projectId: string) {
+    setProjectMessage(null);
+    setBusyAction(`select-project-${projectId}`);
+
+    try {
+      const loadedWorkspace = await loadProjectWorkspace(projectId, {
+        resetMessages: false,
+        syncProjectSetupFields: true,
+      });
+      setScreen(inferScreenFromWorkspace(loadedWorkspace));
+    } catch (error) {
+      setProjectMessage(errorMessage(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleDeleteProject(projectId: string) {
+    const targetProject =
+      projects.find((savedProject) => savedProject.id === projectId) ?? null;
+
+    if (!targetProject) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Remove "${targetProject.name}" from Scratch Pad? This does not delete the local repo folder.`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setProjectMessage(null);
+    setBusyAction(`delete-project-${projectId}`);
+
+    const remainingProjects = projects.filter(
+      (savedProject) => savedProject.id !== projectId,
+    );
+    const deletedCurrentProject = project?.id === projectId;
+
+    try {
+      await deleteProject(projectId);
+      setProjects(remainingProjects);
+
+      if (!deletedCurrentProject) {
+        setProjectMessage(
+          successMessage(
+            "Project removed from Scratch Pad. Local files stayed on disk.",
+          ),
+        );
+        return;
+      }
+
+      if (remainingProjects.length === 0) {
+        clearSelectedProjectState({ screen: "projects" });
+        setProjectMessage(
+          successMessage(
+            "Project removed from Scratch Pad. Local files stayed on disk.",
+          ),
+        );
+        return;
+      }
+
+      const nextProject = remainingProjects[0];
+
+      if (!nextProject) {
+        clearSelectedProjectState({ screen: "projects" });
+        setProjectMessage(
+          successMessage(
+            "Project removed from Scratch Pad. Local files stayed on disk.",
+          ),
+        );
+        return;
+      }
+
+      const loadedWorkspace = await loadProjectWorkspace(nextProject.id, {
+        resetMessages: false,
+        syncProjectSetupFields: true,
+      });
+      setScreen(inferScreenFromWorkspace(loadedWorkspace));
+      setProjectMessage(
+        successMessage(
+          `Project removed from Scratch Pad. Switched to "${nextProject.name}".`,
+        ),
+      );
+    } catch (error) {
+      setProjectMessage(errorMessage(error));
+      void loadProjects().catch(() => undefined);
     } finally {
       setBusyAction(null);
     }
@@ -308,11 +474,73 @@ export default function App() {
         resetMessages: false,
         syncProjectSetupFields: true,
       });
+      void loadProjects().catch(() => undefined);
       setProjectMessage(successMessage("Project setup saved."));
     } catch (error) {
       setProjectMessage(errorMessage(error));
     } finally {
       setBusyAction(null);
+    }
+  }
+
+  async function handleBrowseDirectories(path?: string) {
+    setDirectoryPicker((previousState) => ({
+      ...previousState,
+      open: true,
+      loading: true,
+      error: null,
+    }));
+
+    try {
+      const browserResult = await browseDirectories(path);
+      setDirectoryPicker((previousState) => ({
+        ...previousState,
+        open: true,
+        loading: false,
+        currentPath: browserResult.currentPath,
+        parentPath: browserResult.parentPath,
+        directories: browserResult.directories,
+        error: null,
+      }));
+    } catch (error) {
+      setDirectoryPicker((previousState) => ({
+        ...previousState,
+        open: true,
+        loading: false,
+        error: getErrorMessage(error),
+      }));
+    }
+  }
+
+  async function handleCreateDirectory() {
+    if (directoryPicker.currentPath.trim().length === 0) {
+      return;
+    }
+
+    setDirectoryPicker((previousState) => ({
+      ...previousState,
+      loading: true,
+      error: null,
+    }));
+
+    try {
+      const result = await createDirectory({
+        parentPath: directoryPicker.currentPath,
+        name: directoryPicker.newFolderName,
+      });
+      setRepoPath(result.path);
+      setDirectoryPicker((previousState) => ({
+        ...previousState,
+        newFolderName: "",
+      }));
+      await handleBrowseDirectories(result.path);
+      setProjectMessage(successMessage(result.message));
+    } catch (error) {
+      setDirectoryPicker((previousState) => ({
+        ...previousState,
+        loading: false,
+        error: getErrorMessage(error),
+      }));
     }
   }
 
@@ -636,6 +864,9 @@ export default function App() {
   useEffect(() => {
     void loadHealth();
     void loadAdapterStatuses();
+    void loadProjects().catch((error) => {
+      setProjectMessage(errorMessage(error));
+    });
 
     const savedProjectId = window.localStorage.getItem(
       CURRENT_PROJECT_STORAGE_KEY,
@@ -798,6 +1029,7 @@ export default function App() {
 
         {currentScreen === "projects" ? (
           <ActiveProjectsScreen
+            projects={projects}
             project={project}
             projectSynopsis={projectSynopsis}
             projectMessage={projectMessage}
@@ -805,17 +1037,43 @@ export default function App() {
             projectAdapter={projectAdapter}
             repoPath={repoPath}
             setupAdapter={setupAdapter}
+            directoryPicker={directoryPicker}
             codexAdapterStatus={codexAdapterStatus}
             busyAction={busyAction}
             onProjectNameChange={setProjectName}
             onProjectAdapterChange={setProjectAdapter}
             onRepoPathChange={setRepoPath}
             onSetupAdapterChange={setSetupAdapter}
+            onDirectoryPickerNewFolderNameChange={(value) =>
+              setDirectoryPicker((previousState) => ({
+                ...previousState,
+                newFolderName: value,
+              }))
+            }
             onCreateProject={handleCreateProject}
             onSaveProjectSetup={handleSaveProjectSetup}
             onDiveIn={() => setScreen("command")}
             onBackToWelcome={() => setScreen("welcome")}
             onOpenCodexApp={() => void handleOpenCodexApp()}
+            onSelectProject={(projectId) => void handleSelectProject(projectId)}
+            onDeleteProject={(projectId) => void handleDeleteProject(projectId)}
+            onBrowseDirectories={(path) => void handleBrowseDirectories(path)}
+            onSelectDirectory={(path) => {
+              setRepoPath(path);
+              setDirectoryPicker((previousState) => ({
+                ...previousState,
+                open: false,
+                error: null,
+              }));
+            }}
+            onCreateDirectory={() => void handleCreateDirectory()}
+            onCloseDirectoryPicker={() =>
+              setDirectoryPicker((previousState) => ({
+                ...previousState,
+                open: false,
+                error: null,
+              }))
+            }
             canOpenCodexDesktop={canOpenCodexDesktop}
             currentStage={workspace?.currentStage ?? "project"}
           />
@@ -1034,6 +1292,7 @@ function WelcomeScreen(props: {
 }
 
 function ActiveProjectsScreen(props: {
+  projects: Project[];
   project: ProjectWorkspace["project"] | null;
   projectSynopsis: string;
   projectMessage: ActionMessage | null;
@@ -1041,6 +1300,7 @@ function ActiveProjectsScreen(props: {
   projectAdapter: "" | Exclude<PreferredAdapter, null>;
   repoPath: string;
   setupAdapter: "" | Exclude<PreferredAdapter, null>;
+  directoryPicker: DirectoryPickerState;
   codexAdapterStatus: AdapterStatus | null;
   busyAction: string | null;
   onProjectNameChange: (value: string) => void;
@@ -1049,11 +1309,18 @@ function ActiveProjectsScreen(props: {
   ) => void;
   onRepoPathChange: (value: string) => void;
   onSetupAdapterChange: (value: "" | Exclude<PreferredAdapter, null>) => void;
+  onDirectoryPickerNewFolderNameChange: (value: string) => void;
   onCreateProject: (event: FormEvent<HTMLFormElement>) => void;
   onSaveProjectSetup: (event: FormEvent<HTMLFormElement>) => void;
   onDiveIn: () => void;
   onBackToWelcome: () => void;
   onOpenCodexApp: () => void;
+  onSelectProject: (projectId: string) => void;
+  onDeleteProject: (projectId: string) => void;
+  onBrowseDirectories: (path?: string) => void;
+  onSelectDirectory: (path: string) => void;
+  onCreateDirectory: () => void;
+  onCloseDirectoryPicker: () => void;
   canOpenCodexDesktop: boolean;
   currentStage: ProjectWorkspace["currentStage"];
 }) {
@@ -1070,17 +1337,102 @@ function ActiveProjectsScreen(props: {
           </GhostButton>
         </div>
 
-        <div className="mt-10 grid max-w-[1110px] gap-8 xl:grid-cols-[513px_513px] xl:items-start">
-          <section className={cx(PANEL_CLASS, "min-h-[446px] overflow-hidden")}>
+        <section className={cx(PANEL_CLASS, "mt-6 overflow-hidden")}>
+          <header className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-6 py-5">
+            <div>
+              <div className="font-display text-[18px] lowercase tracking-[0.08em] text-white md:text-[24px]">
+                saved_projects
+              </div>
+              <p className="mt-2 font-body text-sm leading-7 text-white/58">
+                Older ideas stay visible here so you can jump between them without losing setup state.
+              </p>
+            </div>
+
+            <Badge>{props.projects.length} total</Badge>
+          </header>
+
+          <div className="grid gap-4 px-6 py-5 md:grid-cols-2 xl:grid-cols-3">
+            {props.projects.length === 0 ? (
+              <EmptyGlassState>
+                No saved projects yet. Create the first one from the panel below.
+              </EmptyGlassState>
+            ) : (
+              props.projects.map((savedProject) => {
+                const isSelected = savedProject.id === props.project?.id;
+
+                return (
+                  <button
+                    key={savedProject.id}
+                    type="button"
+                    onClick={() => props.onSelectProject(savedProject.id)}
+                    disabled={
+                      props.busyAction === `select-project-${savedProject.id}`
+                    }
+                    className={cx(
+                      "min-h-[180px] rounded-[24px] border px-5 py-5 text-left transition",
+                      isSelected
+                        ? "border-white/28 bg-white/[0.12] shadow-[0_0_0_1px_rgba(255,255,255,0.04)]"
+                        : "border-white/10 bg-white/[0.05] hover:border-white/20 hover:bg-white/[0.08]",
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="font-display text-[18px] lowercase tracking-[0.08em] text-white md:text-[22px]">
+                          {savedProject.name}
+                        </div>
+                        <div className="mt-2 text-xs uppercase tracking-[0.2em] text-white/42">
+                          {isSelected ? "selected_project" : "saved_project"}
+                        </div>
+                      </div>
+
+                      <Badge>
+                        {savedProject.repoPath ? "repo_linked" : "setup_needed"}
+                      </Badge>
+                    </div>
+
+                    <div className="mt-4 font-body text-xs leading-6 text-white/55">
+                      {savedProject.preferredAdapter
+                        ? formatAdapterLabel(savedProject.preferredAdapter)
+                        : "adapter_not_set"}
+                    </div>
+
+                    <div className="mt-4 font-body text-sm leading-7 text-white/68">
+                      {savedProject.repoPath
+                        ? truncateText(savedProject.repoPath, 120)
+                        : "Connect a local repo path from the larger project panel below."}
+                    </div>
+
+                    <div className="mt-5 text-xs uppercase tracking-[0.2em] text-white/36">
+                      updated / {formatTimestamp(savedProject.updatedAt)}
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </section>
+
+        <div className="mt-10 grid max-w-[1420px] gap-8 xl:grid-cols-[minmax(0,1.35fr)_minmax(340px,0.72fr)] xl:items-start">
+          <section className={cx(PANEL_CLASS, "min-h-[540px] overflow-hidden")}>
             <header className="border-b border-white/10 px-6 py-6">
-              <div className="text-center font-display text-[20px] lowercase tracking-[0.08em] text-white md:text-[30px]">
-                {props.project?.name ?? "no_active_project"}
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs uppercase tracking-[0.22em] text-white/42">
+                    selected_project
+                  </div>
+                  <div className="mt-2 font-display text-[20px] lowercase tracking-[0.08em] text-white md:text-[30px]">
+                    {props.project?.name ?? "no_active_project"}
+                  </div>
+                </div>
+
+                {props.project ? (
+                  <Badge>{formatProjectWorkspaceStage(props.currentStage)}</Badge>
+                ) : null}
               </div>
             </header>
 
             <div className="flex h-full flex-col gap-5 px-6 py-6">
               <div className="flex flex-wrap gap-2">
-                <Badge>{formatProjectWorkspaceStage(props.currentStage)}</Badge>
                 <Badge>
                   {props.project?.preferredAdapter
                     ? formatAdapterLabel(props.project.preferredAdapter)
@@ -1109,6 +1461,32 @@ function ActiveProjectsScreen(props: {
                       }
                     />
                   </label>
+
+                  <div className="flex flex-wrap gap-3">
+                    <GhostButton
+                      onClick={() => props.onBrowseDirectories(props.repoPath)}
+                    >
+                      browse_folders
+                    </GhostButton>
+
+                    {props.directoryPicker.open ? (
+                      <GhostButton onClick={props.onCloseDirectoryPicker}>
+                        close_browser
+                      </GhostButton>
+                    ) : null}
+                  </div>
+
+                  {props.directoryPicker.open ? (
+                    <DirectoryPickerPanel
+                      state={props.directoryPicker}
+                      onNavigate={(path) => props.onBrowseDirectories(path)}
+                      onSelect={props.onSelectDirectory}
+                      onCreateDirectory={props.onCreateDirectory}
+                      onNewFolderNameChange={
+                        props.onDirectoryPickerNewFolderNameChange
+                      }
+                    />
+                  ) : null}
 
                   <label className="block space-y-2">
                     <span className="text-xs uppercase tracking-[0.2em] text-white/45">
@@ -1154,6 +1532,17 @@ function ActiveProjectsScreen(props: {
                         ? "opening_codex..."
                         : "open_codex_app"}
                     </GhostButton>
+
+                    <GhostButton
+                      onClick={() => props.onDeleteProject(props.project!.id)}
+                      disabled={
+                        props.busyAction === `delete-project-${props.project!.id}`
+                      }
+                    >
+                      {props.busyAction === `delete-project-${props.project!.id}`
+                        ? "removing..."
+                        : "remove_from_scratch_pad"}
+                    </GhostButton>
                   </div>
 
                   {props.codexAdapterStatus?.appMessage ? (
@@ -1161,6 +1550,10 @@ function ActiveProjectsScreen(props: {
                       {props.codexAdapterStatus.appMessage}
                     </p>
                   ) : null}
+
+                  <p className="font-body text-xs leading-6 text-white/42">
+                    Removing a project only clears it from Scratch Pad. The local repo folder stays on disk.
+                  </p>
                 </form>
               ) : (
                 <div className={cx(INNER_CARD_CLASS, "p-5 font-body text-sm leading-7 text-white/65")}>
@@ -1185,9 +1578,9 @@ function ActiveProjectsScreen(props: {
             </div>
           </section>
 
-          <section className={cx(PANEL_CLASS, "overflow-hidden")}>
+          <section className={cx(PANEL_CLASS, "overflow-hidden xl:mt-10")}>
             <header className="border-b border-white/10 px-6 py-6">
-              <div className="text-center font-display text-[20px] lowercase tracking-[0.08em] text-white md:text-[30px]">
+              <div className="text-center font-display text-[18px] lowercase tracking-[0.08em] text-white md:text-[24px]">
                 new_idea <span className="text-white/55">+</span>
               </div>
             </header>
@@ -1229,7 +1622,7 @@ function ActiveProjectsScreen(props: {
               </label>
 
               <p className="font-body text-sm leading-7 text-white/62">
-                Start a new local idea thread, then wire in the repo path from the active project card once the concept is ready.
+                Start a new idea thread here, then use the larger saved-project surface to finish setup and move into the command center.
               </p>
 
               <ActionButton
@@ -1248,7 +1641,7 @@ function ActiveProjectsScreen(props: {
         </div>
 
         {props.projectMessage ? (
-          <div className="mt-5 max-w-[1110px]">
+          <div className="mt-5 max-w-[1420px]">
             <InlineMessage tone={props.projectMessage.tone}>
               {props.projectMessage.text}
             </InlineMessage>
@@ -1258,6 +1651,89 @@ function ActiveProjectsScreen(props: {
         <BrandMark className="mt-auto justify-end pt-5" />
       </div>
     </FrameSurface>
+  );
+}
+
+function DirectoryPickerPanel(props: {
+  state: DirectoryPickerState;
+  onNavigate: (path?: string) => void;
+  onSelect: (path: string) => void;
+  onCreateDirectory: () => void;
+  onNewFolderNameChange: (value: string) => void;
+}) {
+  return (
+    <div className={cx(INNER_CARD_CLASS, "space-y-4 p-4")}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="text-xs uppercase tracking-[0.2em] text-white/42">
+            current_folder
+          </div>
+          <div className="mt-2 break-all font-body text-sm leading-7 text-white/74">
+            {props.state.currentPath || "loading..."}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <GhostButton
+            onClick={() => props.onNavigate(props.state.parentPath ?? undefined)}
+            disabled={props.state.loading || !props.state.parentPath}
+          >
+            up
+          </GhostButton>
+          <ActionButton
+            onClick={() => props.onSelect(props.state.currentPath)}
+            disabled={props.state.loading || props.state.currentPath.length === 0}
+          >
+            use_this_folder
+          </ActionButton>
+        </div>
+      </div>
+
+      {props.state.error ? (
+        <InlineMessage tone="error">{props.state.error}</InlineMessage>
+      ) : null}
+
+      <div className="space-y-2">
+        {props.state.loading ? (
+          <EmptyGlassState>Loading local folders...</EmptyGlassState>
+        ) : props.state.directories.length === 0 ? (
+          <EmptyGlassState>No subfolders found here.</EmptyGlassState>
+        ) : (
+          props.state.directories.slice(0, 12).map((directory) => (
+            <button
+              key={directory.path}
+              type="button"
+              onClick={() => props.onNavigate(directory.path)}
+              className="w-full rounded-[16px] border border-white/10 bg-white/[0.04] px-4 py-3 text-left font-body text-sm leading-7 text-white/72 transition hover:border-white/20 hover:bg-white/[0.08]"
+            >
+              {directory.name}
+            </button>
+          ))
+        )}
+      </div>
+
+      <div className="space-y-3 border-t border-white/10 pt-4">
+        <div className="text-xs uppercase tracking-[0.2em] text-white/42">
+          create_new_folder_here
+        </div>
+        <input
+          className={FIELD_CLASS}
+          placeholder="new-project-folder"
+          value={props.state.newFolderName}
+          onChange={(event) =>
+            props.onNewFolderNameChange(event.target.value)
+          }
+        />
+        <ActionButton
+          onClick={props.onCreateDirectory}
+          disabled={
+            props.state.loading || props.state.newFolderName.trim().length === 0
+          }
+        >
+          create_folder
+        </ActionButton>
+      </div>
+    </div>
   );
 }
 

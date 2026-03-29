@@ -1,8 +1,11 @@
 import {
   AdapterStatusListSchema,
   ApprovePrdInputSchema,
+  CreateDirectoryInputSchema,
+  CreateDirectoryResultSchema,
   CreateProjectInputSchema,
   CreateScratchNoteInputSchema,
+  DirectoryBrowserResultSchema,
   DraftPrdInputSchema,
   HealthResponseSchema,
   OpenCodexAppResultSchema,
@@ -11,6 +14,7 @@ import {
   PrepareReviewResultSchema,
   ProductContextMutationResultSchema,
   ProductContextUpdateInputSchema,
+  ProjectListSchema,
   ProjectSchema,
   ProjectWorkspaceSchema,
   RevisePrdInputSchema,
@@ -19,6 +23,8 @@ import {
   TaskGenerationResultSchema,
   UpdateScratchNoteInputSchema,
   type AdapterStatus,
+  type CreateDirectoryResult,
+  type DirectoryBrowserResult,
   type PlanMutationResult,
   type PlanVersion,
   type PrepareReviewResult,
@@ -66,6 +72,12 @@ export async function fetchProjectWorkspace(projectId: string) {
   });
 }
 
+export async function fetchProjects() {
+  return request("/api/projects", {
+    schema: ProjectListSchema,
+  });
+}
+
 export async function createProject(input: {
   name: string;
   preferredAdapter: PreferredAdapter;
@@ -77,6 +89,12 @@ export async function createProject(input: {
     body: JSON.stringify(payload),
     headers: jsonHeaders,
     schema: ProjectSchema,
+  });
+}
+
+export async function deleteProject(projectId: string) {
+  await request(`/api/projects/${projectId}`, {
+    method: "DELETE",
   });
 }
 
@@ -101,6 +119,37 @@ export async function openCodexApp(projectId: string) {
   return request(`/api/projects/${projectId}/open-codex-app`, {
     method: "POST",
     schema: OpenCodexAppResultSchema,
+  });
+}
+
+export async function browseDirectories(path?: string) {
+  const searchParams = new URLSearchParams();
+
+  if (path?.trim()) {
+    searchParams.set("path", path.trim());
+  }
+
+  const query = searchParams.toString();
+
+  return request(
+    `/api/filesystem/directories${query ? `?${query}` : ""}`,
+    {
+      schema: DirectoryBrowserResultSchema,
+    },
+  );
+}
+
+export async function createDirectory(input: {
+  parentPath: string;
+  name: string;
+}) {
+  const payload = CreateDirectoryInputSchema.parse(input);
+
+  return request("/api/filesystem/directories", {
+    method: "POST",
+    body: JSON.stringify(payload),
+    headers: jsonHeaders,
+    schema: CreateDirectoryResultSchema,
   });
 }
 
@@ -300,6 +349,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export type {
   AdapterStatus,
+  CreateDirectoryResult,
+  DirectoryBrowserResult,
   OpenCodexAppResult,
   PlanMutationResult,
   PlanVersion,

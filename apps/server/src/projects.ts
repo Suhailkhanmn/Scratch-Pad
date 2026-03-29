@@ -62,6 +62,27 @@ export function createProject(
   return project;
 }
 
+export function listProjects(database: DatabaseSync): Project[] {
+  const rows = database
+    .prepare(
+      `
+        SELECT
+          id,
+          name,
+          repo_path,
+          preferred_adapter,
+          status,
+          created_at,
+          updated_at
+        FROM projects
+        ORDER BY updated_at DESC, created_at DESC, id DESC
+      `,
+    )
+    .all() as ProjectRow[];
+
+  return rows.map(mapProjectRow);
+}
+
 export function getProjectById(
   database: DatabaseSync,
   id: string,
@@ -84,6 +105,25 @@ export function getProjectById(
     .get(id) as ProjectRow | undefined;
 
   return row ? mapProjectRow(row) : null;
+}
+
+export function deleteProject(database: DatabaseSync, id: string) {
+  const existingProject = getProjectById(database, id);
+
+  if (!existingProject) {
+    return false;
+  }
+
+  database
+    .prepare(
+      `
+        DELETE FROM projects
+        WHERE id = ?
+      `,
+    )
+    .run(id);
+
+  return true;
 }
 
 export function updateProjectSetup(
